@@ -13,3 +13,9 @@ The loader runs only on the Cinderhollow page or a local test host. It modifies 
 ## What saves
 
 Custom weapon designs, Studio controls (including FOV), and Value Lab catalog edits are stored in this browser's local storage. Equipped weapons and progression use Cinderhollow's normal game save. Live player values such as current HP are temporary unless the game itself saves them. Clearing browser site data removes these stored values.
+
+## Boss Arena
+
+Open F2 → World & Bosses → Boss Arena. Pick a boss and a count (1–50 per click); click again to add more. Every spawned boss has its own health bar in a scrollable stack and can be damaged by the player. Brawl mode lets bosses damage each other and the player; Hunt mode sends them after the player. You can also run a two-boss clash or an eight-boss tournament, adjust fight speed, and switch the camera between the player and the arena.
+
+Arena fights use simplified attacks so multiple bosses can run together. They do not grant story rewards or mark bosses defeated. Turn off God mode in Quick Controls if you want boss attacks to damage you. Arena spawns are temporary and clear when you leave the room or reload.
