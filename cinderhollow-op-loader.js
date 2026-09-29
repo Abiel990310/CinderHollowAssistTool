@@ -26,21 +26,15 @@
 
   let html = await response.text();
   html = html.replace(/\/\* CH_OP_BEGIN \*\/[\s\S]*?\/\* CH_OP_END \*\//g, '');
-  // The game draws its world to a fixed 384x216 buffer and its HUD separately.
-  // Scale only world-space drawing; keep the HUD and its native resolution intact.
-  const patchGame = (before, after) => {
-    if (!html.includes(before)) throw new Error('The game camera code changed; FOV patch needs an update.');
-    html = html.replace(before, after);
-  };
-  patchGame('g.setTransform(1, 0, 0, 1, -cx, -cy);\n  g.drawImage(room.back, 0, 0);',
-    'const studioZoom = 100 / (window.__CINDERHOLLOW_FOV__ || 100);\n  g.setTransform(studioZoom, 0, 0, studioZoom, (1 - studioZoom) * W / 2 - cx * studioZoom, (1 - studioZoom) * H / 2 - cy * studioZoom);\n  g.drawImage(room.back, 0, 0);');
-  patchGame('LX.on = !!(room && SETTINGS.shaders', 'LX.on = !!((window.__CINDERHOLLOW_FOV__ || 100) === 100 && room && SETTINGS.shaders');
-  patchGame('function renderLighting() {\n  const A = AREAS[room.def.biome];',
-    'function renderLighting() {\n  const A = AREAS[room.def.biome];\n  const fovZoom = 100 / (window.__CINDERHOLLOW_FOV__ || 100);\n  const lightX = x => (x - cam.x) * fovZoom + (1 - fovZoom) * W / 2;\n  const lightY = y => (y - cam.y) * fovZoom + (1 - fovZoom) * H / 2;');
-  patchGame('const x = L.x - cam.x, y = L.y - cam.y;\n    if (x < -L.r || x > W + L.r || y < -L.r || y > H + L.r) continue;\n    const gr = lg.createRadialGradient(x, y, 0, x, y, L.r);',
-    'const x = lightX(L.x), y = lightY(L.y), r = L.r * fovZoom;\n    if (x < -r || x > W + r || y < -r || y > H + r) continue;\n    const gr = lg.createRadialGradient(x, y, 0, x, y, r);');
-  patchGame('lg.fillStyle = gr; lg.fillRect(x - L.r, y - L.r, L.r * 2, L.r * 2);', 'lg.fillStyle = gr; lg.fillRect(x - r, y - r, r * 2, r * 2);');
-  patchGame('const x = L.x - cam.x, y = L.y - cam.y, r = L.r * 0.6;', 'const x = lightX(L.x), y = lightY(L.y), r = L.r * fovZoom * 0.6;');
+  // The world transform remains recognizable in both formatted and minified builds.
+  const worldTransform = /g\.setTransform\(\s*1\s*,\s*0\s*,\s*0\s*,\s*1\s*,\s*-(\w+)\s*,\s*-(\w+)\s*\)\s*;\s*g\.drawImage\(room\.back\s*,\s*0\s*,\s*0\s*\)/g;
+  const matches = [...html.matchAll(worldTransform)];
+  if (matches.length !== 1) throw new Error('Could not locate the world camera transform in this game build.');
+  html = html.replace(worldTransform, (_, cameraX, cameraY) => {
+    return 'const studioZoom=100/(window.__CINDERHOLLOW_FOV__||100);' +
+      'g.setTransform(studioZoom,0,0,studioZoom,(1-studioZoom)*W/2-' + cameraX + '*studioZoom,(1-studioZoom)*H/2-' + cameraY + '*studioZoom);' +
+      'g.drawImage(room.back,0,0)';
+  });
   const assetLoader = html.indexOf('<script>(() => { const SZ =');
   const gameScriptEnd = assetLoader < 0 ? -1 : html.lastIndexOf('</script>', assetLoader);
   const startupFunctionEnd = gameScriptEnd < 0 ? -1 : html.lastIndexOf('};', gameScriptEnd);
@@ -83,8 +77,51 @@
     randomAt: 0,
   };
   try { Object.assign(modState, JSON.parse(localStorage.getItem('cinderhollow_op_ui') || '{}')); } catch (_) {}
-  modState.fov = Math.max(100, Math.min(150, Number(modState.fov) || 100));
+  modState.fov = Math.max(100, Math.min(500, Number(modState.fov) || 100));
   window.__CINDERHOLLOW_FOV__ = modState.fov;
+  const nativeLxBegin = lxBegin;
+  lxBegin = function studioLightingStart() {
+    if (modState.fov === 100) return nativeLxBegin();
+    g = gLow;
+    LX.on = false;
+    return false;
+  };
+  const nativeRenderLighting = renderLighting;
+  renderLighting = function studioLighting() {
+    if (modState.fov === 100) return nativeRenderLighting();
+    const area = AREAS[room.def.biome], zoom = 100 / modState.fov;
+    let ambient = typeof darkT !== 'undefined' && darkT > 0 ? Math.min(0.97, area.ambient + 0.4 * Math.min(1, darkT)) : area.ambient;
+    ambient = Math.min(0.97, ambient * [1.15, 1, 0.72][SETTINGS.bright ?? 1]);
+    const lightX = x => (x - cam.x) * zoom + (1 - zoom) * W / 2;
+    const lightY = y => (y - cam.y) * zoom + (1 - zoom) * H / 2;
+    lg.globalCompositeOperation = 'source-over';
+    lg.clearRect(0, 0, W, H);
+    lg.fillStyle = 'rgba(4,3,8,' + ambient + ')';
+    lg.fillRect(0, 0, W, H);
+    lg.globalCompositeOperation = 'destination-out';
+    for (const light of lights) {
+      const x = lightX(light.x), y = lightY(light.y), radius = light.r * zoom;
+      if (x < -radius || x > W + radius || y < -radius || y > H + radius) continue;
+      const gradient = lg.createRadialGradient(x, y, 0, x, y, radius);
+      gradient.addColorStop(0, 'rgba(0,0,0,' + Math.min(1, light.k) + ')');
+      gradient.addColorStop(1, 'rgba(0,0,0,0)');
+      lg.fillStyle = gradient;
+      lg.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.drawImage(lightC, 0, 0);
+    g.globalCompositeOperation = 'lighter';
+    for (const light of lights) {
+      const x = lightX(light.x), y = lightY(light.y), radius = light.r * zoom * 0.6;
+      if (x < -radius || x > W + radius || y < -radius || y > H + radius) continue;
+      const gradient = g.createRadialGradient(x, y, 0, x, y, radius);
+      gradient.addColorStop(0, 'rgba(' + light.color + ',' + (0.16 * light.k) + ')');
+      gradient.addColorStop(1, 'rgba(' + light.color + ',0)');
+      g.fillStyle = gradient;
+      g.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+    }
+    g.globalCompositeOperation = 'source-over';
+  };
   if (!modState.masterEnabled) {
     Object.assign(SETTINGS, studioSettingsBaseline, { god: 0, infst: 0, inffp: 0, nocd: 0, noclip: 0 });
     saveSettings();
@@ -644,7 +681,7 @@
       '<div class="cs-card"><h3>Core</h3>' + toggle('god','God mode','Continuously restore health and status') + toggle('infst','Infinite stamina','Never exhaust stamina') + toggle('inffp','Infinite focus','Unlimited spells and arts') + toggle('nocd','No cooldowns','Abilities reset immediately') + toggle('infJump','Infinite air jumps','Jump and dash indefinitely') + '</div>',
       '<div class="cs-card"><h3>Movement & combat</h3>' + toggle('noclip','Noclip','Fly through terrain with V') + toggle('oneHit','One-hit mode','Reduce all hostiles to one HP') + toggle('shield','Projectile shield','Remove hostile projectiles and hazards') + toggle('freeze','Freeze enemies','Lock enemy movement and actions') + '</div>',
       '<div class="cs-card wide"><h3>Common actions</h3><div class="cs-actions"><button class="cs-btn" data-action="restore">Full restore</button><button class="cs-btn" data-action="currency">Max currency</button><button class="cs-btn" data-action="clear">Clear room</button><button class="cs-btn" data-action="respawn">Respawn room</button><button class="cs-btn" data-action="bosses">Defeat all bosses</button><button class="cs-btn" data-action="restoreBosses">Restore all bosses</button><button class="cs-btn" data-action="reveal">Reveal world</button><button class="cs-btn" data-action="save">Save now</button><button class="cs-btn primary wide" data-action="grant">Unlock and maximize everything</button></div></div></div></section>',
-      '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="150" step="5" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
+      '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting. Zoom out as far as 5×.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="500" step="10" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
       '<section class="cs-page" data-page="inventory"><div class="cs-pagehead"><div><h2>Inventory & Progression</h2><p>Currency, flasks, materials, skills, spells, and equipment ownership.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Economy</h3><div class="cs-fields">' + field('cinders','Cinders',SAVE.cinders) + field('shards','Skill shards',SAVE.shards) + field('emberstone','Emberstone',SAVE.inv.emberstone || 0) + '</div></div><div class="cs-card"><h3>Flasks</h3><div class="cs-fields">' + field('flaskBase','Total charges',SAVE.flaskBase) + field('flaskBlue','Azure allocation',SAVE.flaskBlue) + field('flaskPot','Flask potency',SAVE.flaskPot) + '</div></div><div class="cs-card wide"><h3>Ownership</h3><div class="cs-actions"><button class="cs-btn" data-action="ownership">Safely unlock all gear, skills and charms</button><button class="cs-btn" data-action="currency">Max currencies and materials</button><button class="cs-btn" data-action="save">Commit inventory to save</button><button class="cs-btn" data-action="fireworks">Preview reward effect</button></div><p class="cs-help" style="margin-top:10px">Preserves the equipped loadout and follows the game’s mutually exclusive skill-tree rules.</p></div></div></section>',
       '<section class="cs-page" data-page="combat"><div class="cs-pagehead"><div><h2>Combat Systems</h2><p>Damage, AI control, defensive automation, and arsenal behavior.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Damage model</h3><div class="cs-field"><label>Global weapon base power</label><input class="cs-range" type="range" min="1" max="100000" step="100" data-range="weaponPower"><output data-output="weaponPower"></output></div>' + toggle('oneHit','One-hit hostiles','Set enemies and bosses to one HP') + toggle('killAura','Kill aura','Defeat nearby targets automatically') + '</div><div class="cs-card"><h3>AI & projectiles</h3>' + toggle('freeze','Freeze all AI','Stops enemies and active bosses') + toggle('vacuum','Enemy vacuum','Pull enemies toward the player') + toggle('shield','Projectile shield','Remove enemy shots and hazards') + '</div><div class="cs-card wide"><h3>Arsenal automation</h3>' + toggle('randomArsenal','Random arsenal','Cycle random weapons and arts') + toggle('storm','Cinder aura','Persistent ambient particle field') + '<div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-action="fireworks">Cinderfall effect</button><button class="cs-btn" data-action="clear">Clear active combat</button></div></div></div></section>',
       '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
