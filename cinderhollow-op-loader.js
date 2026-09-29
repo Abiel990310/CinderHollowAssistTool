@@ -466,7 +466,7 @@
   };
   const nativeRenderHUD = renderHUD;
   renderHUD = function studioRenderHUD() {
-    if (!studioBosses.length) return nativeRenderHUD();
+    if (!studioBosses.some(f => f.alive && f.hp > 0)) return nativeRenderHUD();
     const savedBoss = boss;
     boss = null; // the arena health stack replaces the single native boss bar
     try { return nativeRenderHUD(); } finally { boss = savedBoss; }
@@ -923,8 +923,8 @@
     const bossHudRows = new Map();
     const bossHudTitle = document.createElement('div'); bossHudTitle.className = 'cs-boss-stack-title'; bossHud.appendChild(bossHudTitle);
     setInterval(() => {
-      const all = studioBossRoom === (room && room.id) ? studioBosses.slice() : [];
-      if (all.length && boss && boss.active && !boss.__studioExhibition) all.unshift(boss);
+      const all = studioBossRoom === (room && room.id) ? studioBosses.filter(f => f.alive && f.hp > 0) : [];
+      if (all.length && boss && boss.active && boss.alive && boss.hp > 0 && !boss.__studioExhibition) all.unshift(boss);
       bossHud.classList.toggle('ch-hidden', !all.length);
       if (!all.length) { for (const row of bossHudRows.values()) row.remove(); bossHudRows.clear(); return; }
       bossHudTitle.textContent = all.length + (all.length === 1 ? ' boss' : ' bosses') + ' · ' + (studioBossMode === 'brawl' ? 'Brawl' : 'Hunt');
@@ -939,7 +939,6 @@
           const track = document.createElement('div'); track.className = 'cs-boss-hp-track';
           const fill = document.createElement('div'); fill.className = 'cs-boss-hp-fill'; track.appendChild(fill); row.append(label, track); bossHudRows.set(key, row); bossHud.appendChild(row);
         }
-        row.classList.toggle('dead', !fighter.alive);
         row.children[0].children[0].textContent = fighter.name;
         row.children[0].children[1].textContent = Math.ceil(fighter.hp) + '/' + Math.ceil(fighter.maxHp);
         row.children[1].firstChild.style.width = (100 * Math.max(0, fighter.hp) / Math.max(1, fighter.maxHp)).toFixed(1) + '%';
