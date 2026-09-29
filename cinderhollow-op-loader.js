@@ -302,6 +302,15 @@
   // The game has one native boss slot. Arena fighters live beside it so any
   // number can be hit by the player without changing story progression.
   const studioBosses = [];
+  let studioCorpseAlpha = 1;
+  const originalDrawSprite = drawSprite, originalDrawRotated = drawRotated;
+  drawSprite = function studioFadingSprite(sh, frame, x, y, face, options) {
+    if (studioCorpseAlpha >= 1) return originalDrawSprite(sh, frame, x, y, face, options);
+    return originalDrawSprite(sh, frame, x, y, face, { ...(options || {}), alpha: (options && options.alpha !== undefined ? options.alpha : 1) * studioCorpseAlpha });
+  };
+  drawRotated = function studioFadingRotated(sh, frame, x, y, angle, alpha) {
+    return originalDrawRotated(sh, frame, x, y, angle, (alpha === undefined ? 1 : alpha) * studioCorpseAlpha);
+  };
   const teamPalette = ['#dc7553','#7ba9d5','#9ac477','#c29ade','#dec16d','#7bc4bc','#d894a8','#a8a6d6'];
   const fallbackBossFactories = {
     hound: (x, y) => new Hound(x, y), omen: (x, y) => new Omen(x, y),
@@ -404,8 +413,9 @@
     fighter.die = () => {
       if (fighter.state === 'dead') return;
       fighter.hp = 0; fighter.state = 'dead'; fighter.active = false;
+      fighter.__studioDeathAt = time; fighter.__studioWindup = 0; fighter.__studioPendingTarget = null; fighter.__studioAttackPlaying = false;
       if (fighter.sh && fighter.sh.has('death')) fighter.anim.set('death', false, 1);
-      if (fighter.parts) for (const part of fighter.parts) { part.state = 'dead'; if (part.anim && part.sh && part.sh.has('death')) part.anim.set('death', false, 1); }
+      if (fighter.parts) for (const part of fighter.parts) { part.state = 'dead'; part.__studioAttackPlaying = false; if (part.anim && part.sh && part.sh.has('death')) part.anim.set('death', false, 1); }
     };
     return fighter;
   }
@@ -422,7 +432,27 @@
     fighter.active = true; fighter.introT = 0; fighter.state = 'idle'; fighter.__studioExhibition = true;
     if (fighter.anim && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
     revealStudioBoss(fighter);
-    fighter.die = function () { this.hp = 0; this.state = 'dead'; this.active = false; if (this.parts) for (const part of this.parts) part.state = 'dead'; };
+    const originalUpdate = fighter.update.bind(fighter), originalDraw = fighter.draw.bind(fighter);
+    fighter.update = dt => {
+      if (fighter.alive) return originalUpdate(dt);
+      if (fighter.anim) fighter.anim.update(dt);
+      if (Array.isArray(fighter.parts)) for (const part of fighter.parts) if (part.anim) part.anim.update(dt);
+    };
+    fighter.draw = () => {
+      const age = fighter.alive ? 0 : time - (fighter.__studioDeathAt === undefined ? time : fighter.__studioDeathAt);
+      if (!fighter.alive && age >= 2.2) return;
+      const previousAlpha = studioCorpseAlpha;
+      studioCorpseAlpha = !fighter.alive && age > 1.3 ? Math.max(0, (2.2 - age) / 0.9) : 1;
+      g.save();
+      g.globalAlpha = studioCorpseAlpha;
+      try { originalDraw(); } finally { g.restore(); studioCorpseAlpha = previousAlpha; }
+    };
+    fighter.die = function () {
+      if (this.state === 'dead') return;
+      this.hp = 0; this.state = 'dead'; this.active = false; this.__studioDeathAt = time;
+      if (this.anim && this.sh && this.sh.has('death')) this.anim.set('death', false, 1);
+      if (this.parts) for (const part of this.parts) { part.state = 'dead'; if (part.anim && part.sh && part.sh.has('death')) part.anim.set('death', false, 1); }
+    };
     boss = fighter;
     toast('Native AI: ' + (BOSS_INFO[kind]?.name || kind), 3);
   }
@@ -523,6 +553,7 @@
     dt = (Number(dt) || 1 / 60) * modState.bossFightSpeed / 100;
     const living = studioBosses.filter(f => f.alive && f.hp > 0);
     for (const fighter of studioBosses) {
+      if (!fighter.alive && fighter.__studioDeathAt === undefined) fighter.__studioDeathAt = time;
       updateStudioAnimation(fighter, dt);
       if (Array.isArray(fighter.parts)) for (const part of fighter.parts) updateStudioAnimation(part, dt);
       fighter.flash = Math.max(0, (fighter.flash || 0) - dt * 4);
@@ -581,12 +612,28 @@
         if (studioBattleWinner) toast(studioBattleWinner.name + ' wins the team battle', 5);
       }
     }
+    if (!studioTournament) for (let i = studioBosses.length - 1; i >= 0; i--) {
+      const fighter = studioBosses[i];
+      if (!fighter.alive && fighter.__studioDeathAt !== undefined && time - fighter.__studioDeathAt > 2.2) studioBosses.splice(i, 1);
+    }
   }
   HOOKS.update.push(updateBossClash);
   HOOKS.update.push(updateBossTournament);
+  HOOKS.update.push(() => {
+    if (boss && boss.__studioExhibition && !boss.alive) {
+      if (boss.__studioDeathAt === undefined) boss.__studioDeathAt = time;
+      if (time - boss.__studioDeathAt > 2.2) boss = null;
+    }
+  });
   HOOKS.render.push(() => {
     if (studioBossRoom !== (room && room.id)) return;
     for (const fighter of studioBosses) {
+      const deathAge = fighter.alive ? 0 : time - (fighter.__studioDeathAt === undefined ? time : fighter.__studioDeathAt);
+      if (!fighter.alive && deathAge >= 2.2) continue;
+      const previousAlpha = studioCorpseAlpha;
+      studioCorpseAlpha = !fighter.alive && deathAge > 1.3 ? Math.max(0, (2.2 - deathAge) / 0.9) : 1;
+      g.save();
+      g.globalAlpha = studioCorpseAlpha;
       const sheets = [fighter.anim && fighter.anim.sheet, fighter.anim && fighter.anim.s, fighter.sh,
         ...(Array.isArray(fighter.parts) ? fighter.parts.flatMap(part => [part.anim && part.anim.sheet, part.anim && part.anim.s, part.sh]) : [])];
       let spriteReady = false;
@@ -595,7 +642,7 @@
       catch (error) { if (!fighter.__studioDrawError) console.warn('[Cinderhollow Studio] Boss art failed:', fighter.kind, error); fighter.__studioDrawError = true; }
       if (!spriteReady || fighter.__studioDrawError) {
         g.save(); g.fillStyle = fighter.__studioTeamColor || '#c78263';
-        g.globalAlpha = 0.75; g.fillRect(Math.round(fighter.x - 17), Math.round(fighter.y - 66), 34, 66);
+        g.globalAlpha = 0.75 * studioCorpseAlpha; g.fillRect(Math.round(fighter.x - 17), Math.round(fighter.y - 66), 34, 66);
         g.fillStyle = '#161a20'; g.fillRect(Math.round(fighter.x - 11), Math.round(fighter.y - 58), 22, 8);
         g.restore();
       }
@@ -605,6 +652,7 @@
         g.beginPath(); g.ellipse(Math.round(fighter.x), Math.round(fighter.floor || fighter.y) - 2, 30, 5, 0, 0, Math.PI * 2); g.stroke();
         g.restore();
       }
+      g.restore(); studioCorpseAlpha = previousAlpha;
     }
   });
   const nativeUpdateCamera = updateCamera;
