@@ -47,7 +47,9 @@
 
   const studioSettingsBaseline = Object.assign({}, SETTINGS);
   const studioWeaponBaseline = Object.fromEntries(Object.entries(WEAPONS).map(([id, weapon]) => [id, JSON.parse(JSON.stringify(weapon))]));
-  Object.assign(SETTINGS, { god: 1, infst: 1, inffp: 1, nocd: 1, noclip: 0 });
+  let hasSavedStudioState = false;
+  try { hasSavedStudioState = !!localStorage.getItem('cinderhollow_op_ui'); } catch (_) {}
+  if (!hasSavedStudioState) Object.assign(SETTINGS, { god: 1, infst: 1, inffp: 1, nocd: 1, noclip: 0 });
   FIXED_KEYS.KeyV = 'noclip';
   FIXED_KEYS.KeyO = 'omni';
   applyBindings();
@@ -235,6 +237,7 @@
   }
 
   function restoreWeaponValues(announce) {
+    if (catalogEdits.WEAPONS) { delete catalogEdits.WEAPONS; saveCatalogEdits(); }
     for (const [id, baseline] of Object.entries(studioWeaponBaseline)) {
       if (!WEAPONS[id]) WEAPONS[id] = {};
       for (const key of Object.keys(WEAPONS[id])) delete WEAPONS[id][key];
@@ -555,13 +558,16 @@
     if (typeof WEAPON_CLASS !== 'undefined') WEAPON_CLASS[id] = WEAPON_CLASS[baseId] || 'sword';
     registerStudioWeaponBehavior(id, spec);
     ITEMS['w:' + id] = { name: weapon.name, icon: 'w_' + baseId, sheet: 'ui_icons3', desc: weapon.desc, weapon: id };
-    SAVE.weapons[id] = 5;
-    if (!SAVE.arts.includes(weapon.art)) SAVE.arts.push(weapon.art);
-    SAVE.weapon = id;
-    SAVE.art = weapon.art;
-    if (persist !== false) { customWeapons[id] = Object.assign({}, spec, { id, template: baseId }); saveCustomWeapons(); }
-    refreshDerived(false);
-    saveGame();
+    if (persist !== false) {
+      SAVE.weapons[id] = 5;
+      if (!SAVE.arts.includes(weapon.art)) SAVE.arts.push(weapon.art);
+      SAVE.weapon = id;
+      SAVE.art = weapon.art;
+      customWeapons[id] = Object.assign({}, spec, { id, template: baseId });
+      saveCustomWeapons();
+      refreshDerived(false);
+      saveGame();
+    }
     return id;
   }
 
@@ -601,14 +607,9 @@
   }
 
   function loadCustomWeapons() {
-    const equippedWeapon = SAVE.weapon;
-    const equippedArt = SAVE.art;
     for (const spec of Object.values(customWeapons)) {
       try { installCustomWeapon(spec, false); } catch (_) {}
     }
-    if (WEAPONS[equippedWeapon]) SAVE.weapon = equippedWeapon;
-    if (ARTS[equippedArt]) SAVE.art = equippedArt;
-    if (P && D) refreshDerived(false);
   }
 
   function editableCatalogs() {
@@ -618,6 +619,36 @@
       BOSSES: BOSS_INFO,
       ITEMS,
     };
+  }
+
+  const CATALOG_EDITS_KEY = 'cinderhollow_studio_catalog_edits';
+  let catalogEdits = {};
+  try { catalogEdits = JSON.parse(localStorage.getItem(CATALOG_EDITS_KEY) || '{}') || {}; } catch (_) {}
+  function saveCatalogEdits() {
+    try { localStorage.setItem(CATALOG_EDITS_KEY, JSON.stringify(catalogEdits)); } catch (_) {}
+  }
+  function rememberCatalogRecord(name, key) {
+    if (!key || !['WEAPONS','ARTS','SPELLS','CHARMS','ENEMIES','BOSSES','ITEMS'].includes(name)) return;
+    const record = editableCatalogs()[name][key];
+    if (!record || typeof record !== 'object') return;
+    (catalogEdits[name] ||= {})[key] = JSON.parse(JSON.stringify(record));
+    saveCatalogEdits();
+  }
+  function applyCatalogEdits() {
+    const catalogs = editableCatalogs();
+    for (const [name, records] of Object.entries(catalogEdits)) {
+      const catalog = catalogs[name];
+      if (!catalog || !records || typeof records !== 'object') continue;
+      for (const [key, stored] of Object.entries(records)) {
+        if (!catalog[key] || !stored || typeof stored !== 'object' || Array.isArray(stored)) continue;
+        Object.assign(catalog[key], JSON.parse(JSON.stringify(stored)));
+        if (name === 'WEAPONS' && ITEMS['w:' + key]) {
+          ITEMS['w:' + key].name = catalog[key].name;
+          ITEMS['w:' + key].desc = catalog[key].desc;
+        }
+      }
+    }
+    if (P && D) refreshDerived(false);
   }
 
   function safeJson(value) {
@@ -643,9 +674,11 @@
     if (P && D) refreshDerived(false);
     saveSettings();
     saveGame();
+    if (itemKey) rememberCatalogRecord(catalogName, itemKey);
   }
 
   loadCustomWeapons();
+  applyCatalogEdits();
 
   function makeModUI() {
     const loadingBadge = document.getElementById('ch-op-loading'); if (loadingBadge) loadingBadge.remove();
@@ -749,7 +782,7 @@
       if (!id || !customWeapons[id]) { status.className = 'cs-status err'; status.textContent = 'No saved custom weapon selected.'; return; }
       if (action === 'load') loadWeaponIntoForm(id);
       if (action === 'equip') { SAVE.weapon = id; SAVE.art = WEAPONS[id].art; refreshDerived(false); saveGame(); status.className = 'cs-status ok'; status.textContent = 'Equipped ' + WEAPONS[id].name + '.'; }
-      if (action === 'delete' && confirm('Delete custom weapon ' + (WEAPONS[id].name || id) + '?')) { delete customWeapons[id]; delete studioGunState[id]; delete SIGS[id]; saveCustomWeapons(); if (SAVE.weapon === id) resetLoadout(false); delete WEAPONS[id]; delete ITEMS['w:' + id]; renderCustomWeaponList(); status.className = 'cs-status ok'; status.textContent = 'Deleted custom weapon.'; }
+      if (action === 'delete' && confirm('Delete custom weapon ' + (WEAPONS[id].name || id) + '?')) { delete customWeapons[id]; delete studioGunState[id]; delete SIGS[id]; if (catalogEdits.WEAPONS) { delete catalogEdits.WEAPONS[id]; saveCatalogEdits(); } saveCustomWeapons(); if (SAVE.weapon === id) resetLoadout(false); delete WEAPONS[id]; delete ITEMS['w:' + id]; renderCustomWeaponList(); status.className = 'cs-status ok'; status.textContent = 'Deleted custom weapon.'; }
     }));
     renderCustomWeaponList();
 
@@ -790,6 +823,7 @@
       parent[key] = value;
       if (catalogName === 'SETTINGS') saveSettings();
       if (catalogName === 'SAVE') saveGame();
+      if (recordKey) rememberCatalogRecord(catalogName, recordKey);
       if (catalogName !== 'PLAYER' && P && D) refreshDerived(false);
       if (catalogName === 'WEAPONS' && recordKey && ITEMS['w:' + recordKey]) { ITEMS['w:' + recordKey].name = WEAPONS[recordKey].name; ITEMS['w:' + recordKey].desc = WEAPONS[recordKey].desc; }
     }
@@ -848,6 +882,7 @@
       runtimeSetupDone = true;
       if (modState.masterEnabled) {
         if (modState.autoGrant) grantEverything(false);
+        applyCatalogEdits();
         toast('CINDERHOLLOW STUDIO V5 ARSENAL READY · F2 opens the editor', 6);
       } else toast('Studio loaded in normal-play mode · F2 opens Recovery', 5);
     }
@@ -905,6 +940,7 @@
   });
 
   makeModUI();
+  applyCatalogEdits();
   console.info('[Cinderhollow Studio V5 Arsenal] Installed. F2 = editor, O = Omni, V = noclip.');
 })();/* CH_OP_END */
 `;
