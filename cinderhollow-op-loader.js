@@ -295,15 +295,18 @@
     toast('Clean replay started · Studio cheats remain available', 4);
   }
 
-  // Bosses normally occupy one global slot and only attack the player. Studio
-  // exhibitions use their real sprites/health with a small, separate duel loop.
+  // The game has one native boss slot. Arena fighters live beside it so any
+  // number can be hit by the player without changing story progression.
   const exhibitionKinds = ['hound','omen','ice_warden','bellringer','overseer','oswin','champion','scarab'];
-  let bossExhibition = null;
+  const studioBosses = [];
+  let studioBossRoom = null;
+  let studioBossMode = 'brawl';
+  let studioBossSerial = 0;
   function makeStudioBoss(kind, x, y) {
     const fallback = { hound: () => new Hound(x, y), omen: () => new Omen(x, y) };
     const factory = BOSS_SPAWN[kind];
     const fighter = factory ? factory(x, y, { kind }) : fallback[kind] && fallback[kind]();
-    if (!fighter || typeof fighter.draw !== 'function' || !fighter.anim) throw new Error('Boss art is unavailable in this build.');
+    if (!fighter || typeof fighter.draw !== 'function' || !fighter.anim || typeof fighter.hit !== 'function') throw new Error('Boss art is unavailable in this build.');
     fighter.active = true;
     fighter.introT = 0;
     fighter.cool = 0.4;
@@ -311,86 +314,106 @@
     if (fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
     fighter.rewards = () => {};
     fighter.__studioExhibition = true;
+    fighter.__studioSerial = ++studioBossSerial;
+    fighter.__studioNextHit = 0.5 + Math.random() * 0.6;
+    fighter.__studioAimAt = 0;
+    fighter.__studioSwing = 0;
+    fighter.die = () => {
+      if (fighter.state === 'dead') return;
+      fighter.hp = 0; fighter.state = 'dead'; fighter.active = false;
+      if (fighter.sh && fighter.sh.has('death')) fighter.anim.set('death', false, 1);
+    };
     return fighter;
   }
   function stopBossExhibition() {
-    if (!bossExhibition) return;
-    if (boss === bossExhibition.first) boss = null;
-    bossExhibition = null;
-    hazards = [];
-    projectiles = projectiles.filter(p => p.owner === 'player');
+    studioBosses.length = 0;
+    studioBossRoom = null;
   }
-  function spawnStudioBoss(kind) {
+  function spawnStudioBoss(kind, count = 1, mode = studioBossMode) {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
     if (!exhibitionKinds.includes(kind)) throw new Error('Choose a supported boss.');
-    stopBossExhibition();
-    const x = clamp(P.x + (P.face || 1) * 115, TILE + 35, room.pw - TILE - 35);
-    const fighter = makeStudioBoss(kind, x, P.y);
-    boss = fighter;
-    toast(fighter.name + ' enters the room', 3);
-  }
-  function startBossClash(firstKind, secondKind) {
-    if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
-    if (!exhibitionKinds.includes(firstKind) || !exhibitionKinds.includes(secondKind)) throw new Error('Choose supported bosses.');
-    if (room.pw < 280) throw new Error('This room is too narrow for a boss clash.');
-    stopBossExhibition();
-    const center = clamp(P.x, TILE + 120, room.pw - TILE - 120);
-    const left = makeStudioBoss(firstKind, center - 95, P.y);
-    const right = makeStudioBoss(secondKind, center + 95, P.y);
-    left.face = 1; right.face = -1;
-    const fighters = [left, right];
-    for (const fighter of fighters) {
-      fighter.state = 'idle';
-      if (fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
-      fighter.update = () => {};
-      fighter.die = () => { fighter.hp = 0; fighter.state = 'dead'; fighter.active = false; if (fighter.sh && fighter.sh.has('death')) fighter.anim.set('death', false, 1); };
-      fighter.__studioNextHit = 0.8 + Math.random() * 0.5;
-      fighter.__studioSwing = 0;
+    count = Math.floor(Number(count));
+    if (!Number.isFinite(count) || count < 1 || count > 50) throw new Error('Spawn 1–50 per click. You can click again to add more.');
+    if (studioBossRoom && studioBossRoom !== room.id) stopBossExhibition();
+    studioBossRoom = room.id;
+    studioBossMode = mode === 'hunt' ? 'hunt' : 'brawl';
+    let created = 0;
+    for (let i = 0; i < count; i++) {
+      const ring = studioBosses.length;
+      const offset = (ring % 2 ? -1 : 1) * (110 + (ring % 7) * 32);
+      const x = clamp(P.x + offset, TILE + 25, room.pw - TILE - 25);
+      const fighter = makeStudioBoss(kind, x, P.y);
+      studioBosses.push(fighter);
+      created++;
     }
-    boss = left;
-    bossExhibition = { first:left, second:right, roomId:room.id, winner:null };
-    toast(BOSS_INFO[firstKind].name + ' versus ' + BOSS_INFO[secondKind].name, 4);
+    toast(created + ' ' + BOSS_INFO[kind].name + (created === 1 ? ' enters' : ' enter') + ' the arena', 3);
   }
+  function startBossClash(firstKind, secondKind, mode = 'brawl') {
+    if (!exhibitionKinds.includes(firstKind) || !exhibitionKinds.includes(secondKind)) throw new Error('Choose supported bosses.');
+    stopBossExhibition();
+    spawnStudioBoss(firstKind, 1, mode);
+    spawnStudioBoss(secondKind, 1, mode);
+  }
+  const nativeTargets = targets;
+  targets = function studioTargets() {
+    const list = nativeTargets();
+    for (const fighter of studioBosses) if (fighter.alive && fighter.active) list.push(fighter);
+    return list;
+  };
   function updateBossClash(dt) {
-    const match = bossExhibition;
-    if (!match) return;
-    if (state !== 'play' || !room || room.id !== match.roomId || boss !== match.first) { stopBossExhibition(); return; }
-    for (const [fighter, rival] of [[match.first, match.second], [match.second, match.first]]) {
+    if (!studioBosses.length) return;
+    if (state !== 'play' || !room || room.id !== studioBossRoom) { stopBossExhibition(); return; }
+    dt = Number(dt) || 1 / 60;
+    const living = studioBosses.filter(f => f.alive);
+    for (const fighter of studioBosses) {
       fighter.anim.update(dt);
+      fighter.flash = Math.max(0, (fighter.flash || 0) - dt * 4);
+      fighter.displayHp += (fighter.hp - fighter.displayHp) * Math.min(1, dt * 5);
       if (!fighter.alive) continue;
-      fighter.face = rival.x < fighter.x ? -1 : 1;
-      const distance = Math.abs(rival.x - fighter.x);
-      if (distance > 76) fighter.x = clamp(fighter.x + fighter.face * 64 * dt, TILE + 25, room.pw - TILE - 25);
+      const others = living.filter(f => f !== fighter);
+      const nearest = others.reduce((best, candidate) => !best || Math.abs(candidate.x - fighter.x) < Math.abs(best.x - fighter.x) ? candidate : best, null);
+      if (time >= fighter.__studioAimAt || (fighter.__studioTarget && fighter.__studioTarget !== P && !fighter.__studioTarget.alive)) {
+        fighter.__studioTarget = studioBossMode === 'brawl' && nearest && Math.random() < 0.68 ? nearest : P;
+        fighter.__studioAimAt = time + 1.1;
+      }
+      const target = fighter.__studioTarget || P;
+      const distance = Math.abs(target.x - fighter.x);
+      fighter.face = target.x < fighter.x ? -1 : 1;
+      if (distance > 72) fighter.x = clamp(fighter.x + fighter.face * 62 * dt, TILE + 25, room.pw - TILE - 25);
       fighter.__studioSwing = Math.max(0, fighter.__studioSwing - dt);
       fighter.__studioNextHit -= dt;
-      if (fighter.__studioNextHit <= 0 && distance < 125 && rival.alive) {
-        fighter.__studioNextHit = 0.9 + Math.random() * 0.65;
-        fighter.__studioSwing = 0.34;
+      if (fighter.__studioNextHit <= 0 && distance < 115) {
+        fighter.__studioNextHit = 0.8 + Math.random() * 0.6;
+        fighter.__studioSwing = 0.35;
         const tags = ['attack','bite','sweep','combo','thrust','slash','strike'];
         const tag = fighter.sh && tags.find(t => fighter.sh.has(t));
         if (tag) fighter.anim.set(tag, false, 1.25);
-        const damage = Math.max(30, Math.round(fighter.maxHp * (0.045 + Math.random() * 0.025)));
-        rival.hp = Math.max(0, rival.hp - damage);
-        rival.flash = 0.7;
-        rival.dmgShown = damage;
-        rival.dmgT = 1.5;
-        spawnFx('hit', rival.x, rival.y - 35, fighter.face);
+        const damage = Math.max(28, Math.round(fighter.maxHp * (0.035 + Math.random() * 0.02)));
+        if (target === P) {
+          hurtPlayer(Math.min(60, damage * 0.4), fighter.face, ++hazardId, { src: fighter, parryable: true });
+        } else if (target.alive) {
+          target.hp = Math.max(0, target.hp - damage);
+          target.flash = 0.7; target.dmgShown = damage; target.dmgT = 1.5;
+          spawnFx('hit', target.x, target.y - 35, fighter.face);
+          if (target.hp <= 0) target.die();
+        }
         shake = Math.max(shake, 2);
-        if (rival.hp <= 0) rival.die();
       }
       if (fighter.__studioSwing <= 0 && fighter.anim.done && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
-      fighter.flash = Math.max(0, (fighter.flash || 0) - dt * 4);
-      fighter.displayHp += (fighter.hp - fighter.displayHp) * Math.min(1, dt * 5);
-    }
-    if (!match.winner && (!match.first.alive || !match.second.alive)) {
-      match.winner = match.first.alive ? match.first : match.second;
-      toast(match.winner.name + ' wins the clash', 5);
     }
   }
   HOOKS.update.push(updateBossClash);
-  HOOKS.render.push(() => { if (bossExhibition && bossExhibition.second) bossExhibition.second.draw(); });
+  HOOKS.render.push(() => { if (studioBossRoom === (room && room.id)) for (const fighter of studioBosses) fighter.draw(); });
+  const nativeRenderHUD = renderHUD;
+  renderHUD = function studioRenderHUD() {
+    if (!studioBosses.length) return nativeRenderHUD();
+    const savedBoss = boss;
+    boss = null; // the arena health stack replaces the single native boss bar
+    try { return nativeRenderHUD(); } finally { boss = savedBoss; }
+  };
 
   function defeatAllBosses(announce) {
+    stopBossExhibition();
     const bosses = Object.keys(BOSS_INFO);
     for (const kind of bosses) SAVE.flags['boss:' + kind] = 1;
     SAVE.flags.__allBossesDefeated = bosses.length;
@@ -419,6 +442,7 @@
   }
 
   function restoreAllBosses(announce) {
+    stopBossExhibition();
     const bosses = Object.keys(BOSS_INFO);
     for (const kind of bosses) delete SAVE.flags['boss:' + kind];
     delete SAVE.flags.__allBossesDefeated;
@@ -434,6 +458,7 @@
 
   function respawnCurrentRoom() {
     if (!room || !P || state !== 'play') return;
+    stopBossExhibition();
     enterRoom(room.id, P.x, P.y, { quiet: true });
     toast('Current room respawned', 2);
   }
@@ -792,6 +817,7 @@
       '.cs-toggle{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #242930}.cs-toggle:last-child{border:0}.cs-toggle>div{flex:1}.cs-toggle strong{display:block;font-size:12px;font-weight:600}.cs-toggle small{color:#737d88;font-size:10px}.cs-toggle input{appearance:none;width:34px;height:18px;border-radius:20px;background:#343a43;position:relative;cursor:pointer}.cs-toggle input:after{content:"";position:absolute;width:12px;height:12px;left:3px;top:3px;border-radius:50%;background:#9da5ae;transition:.16s}.cs-toggle input:checked{background:#8f7040}.cs-toggle input:checked:after{left:19px;background:#f5deb4}',
       '.cs-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.cs-btn{min-height:34px;padding:7px 10px;border:1px solid #343a43;border-radius:6px;background:#1b2027;color:#c9ced4;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.cs-btn:hover{border-color:#706044;background:#222831;color:#f1d9ac}.cs-btn.primary{background:#8a6a38;border-color:#a4834e;color:#fff4df}.cs-btn.danger{border-color:#694749;color:#e3b6b8}.cs-btn.wide{grid-column:1/-1}',
       '.cs-duel-readout{margin-top:8px;padding:9px;border:1px solid #323940;border-radius:6px;background:#10151b;color:#c8d0d7;font-size:11px;line-height:1.6}.cs-duel-readout b{color:#f0d29b}',
+      '#ch-boss-stack{position:fixed;right:18px;top:60px;z-index:2147483645;width:min(280px,36vw);max-height:55vh;overflow:auto;padding:9px;border:1px solid #5f4540;border-radius:8px;background:#0c0b10e8;box-shadow:0 12px 32px #000b;color:#f2e5d5;font:600 11px Inter,Segoe UI,sans-serif}#ch-boss-stack.ch-hidden{display:none}.cs-boss-stack-title{padding:1px 3px 8px;color:#e8bd81;letter-spacing:.08em;text-transform:uppercase;font-size:10px}.cs-boss-hp-row{margin:0 2px 8px}.cs-boss-hp-name{display:flex;justify-content:space-between;gap:8px;margin-bottom:3px}.cs-boss-hp-name span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cs-boss-hp-name span:last-child{flex:none;color:#b7a99a;font:10px Consolas,monospace}.cs-boss-hp-track{height:7px;border:1px solid #754d3f;background:#28171b;overflow:hidden}.cs-boss-hp-fill{height:100%;background:linear-gradient(90deg,#9f2937,#d15b48);transition:width .15s}.cs-boss-hp-row.dead{opacity:.43}',
       '.cs-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.cs-fields.four{grid-template-columns:repeat(4,minmax(0,1fr))}.cs-field{display:flex;flex-direction:column;gap:4px}.cs-field.full{grid-column:1/-1}.cs-field label{color:#7f8994;font-size:9px;text-transform:uppercase;letter-spacing:.08em}.cs-input,.cs-select,.cs-textarea{width:100%;border:1px solid #343a43;border-radius:5px;background:#0e1217;color:#dce0e4;padding:8px 9px;font:500 12px Inter,Segoe UI,sans-serif;outline:none}.cs-input:focus,.cs-select:focus,.cs-textarea:focus{border-color:#8d754d;box-shadow:0 0 0 2px #8d754d22}.cs-textarea{min-height:300px;resize:vertical;font:11px/1.45 Consolas,monospace;user-select:text}.cs-range{width:100%;accent-color:#a98145}.cs-status{min-height:18px;margin-top:8px;color:#a8b0b8;font-size:10px}.cs-status.ok{color:#9fc49d}.cs-status.err{color:#e19a9e}',
       '.cs-setting-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.cs-setting{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #292f36;border-radius:6px;background:#12161b}.cs-setting label{flex:1;color:#aeb5bd;font-size:11px}.cs-setting input[type=number],.cs-setting input[type=text]{width:105px}.cs-tablebar{display:flex;gap:8px;margin-bottom:9px}.cs-tablebar>*{flex:1}.cs-kbd{display:inline-block;min-width:22px;padding:2px 5px;border:1px solid #3b4149;border-bottom-color:#59616b;border-radius:4px;background:#1b2027;color:#c9cfd5;text-align:center;font:600 10px Consolas}',
       '.cs-labbar{display:grid;grid-template-columns:170px minmax(130px,1fr) minmax(170px,1.4fr);gap:8px;margin-bottom:12px}.cs-lab-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px;color:#8e98a3;font-size:11px}.cs-lab-meta b{color:#e8d0a1}.cs-value-list{display:grid;gap:7px;max-height:350px;overflow:auto;padding-right:3px}.cs-value-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center;padding:10px 12px;border:1px solid #2d343b;border-radius:7px;background:#131820}.cs-value-name{display:block;font-size:12px;font-weight:650;color:#e2e5e9}.cs-value-note{display:block;margin-top:2px;color:#89939e;font-size:10px}.cs-value-path{display:block;margin-top:3px;color:#63707d;font:10px Consolas,monospace}.cs-value-edit{display:flex;align-items:center;gap:5px}.cs-value-edit .cs-input{width:112px;text-align:right}.cs-value-edit .cs-input[type=text]{width:150px}.cs-mini{min-width:28px;height:29px;border:1px solid #39414a;border-radius:5px;background:#1c232b;color:#e8c98e;cursor:pointer}.cs-mini:hover{background:#303943}.cs-value-current{color:#e8c98e;font:650 12px Consolas,monospace}.cs-raw-details{margin-top:13px;border-top:1px solid #2c3239;padding-top:12px}.cs-raw-details summary{cursor:pointer;color:#aab4be;font-size:11px}.cs-raw-details .cs-textarea{margin-top:10px}.cs-empty{padding:18px;color:#8b96a0;text-align:center;border:1px dashed #343c45;border-radius:7px}',
@@ -816,7 +842,7 @@
       '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting. Zoom out as far as 5×.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="500" step="10" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
       '<section class="cs-page" data-page="inventory"><div class="cs-pagehead"><div><h2>Inventory & Progression</h2><p>Currency, flasks, materials, skills, spells, and equipment ownership.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Economy</h3><div class="cs-fields">' + field('cinders','Cinders',SAVE.cinders) + field('shards','Skill shards',SAVE.shards) + field('emberstone','Emberstone',SAVE.inv.emberstone || 0) + '</div></div><div class="cs-card"><h3>Flasks</h3><div class="cs-fields">' + field('flaskBase','Total charges',SAVE.flaskBase) + field('flaskBlue','Azure allocation',SAVE.flaskBlue) + field('flaskPot','Flask potency',SAVE.flaskPot) + '</div></div><div class="cs-card wide"><h3>Ownership</h3><div class="cs-actions"><button class="cs-btn" data-action="ownership">Safely unlock all gear, skills and charms</button><button class="cs-btn" data-action="currency">Max currencies and materials</button><button class="cs-btn" data-action="save">Commit inventory to save</button><button class="cs-btn" data-action="fireworks">Preview reward effect</button></div><p class="cs-help" style="margin-top:10px">Preserves the equipped loadout and follows the game’s mutually exclusive skill-tree rules.</p></div></div></section>',
       '<section class="cs-page" data-page="combat"><div class="cs-pagehead"><div><h2>Combat Systems</h2><p>Damage, AI control, defensive automation, and arsenal behavior.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Damage model</h3><div class="cs-field"><label>Global weapon base power</label><input class="cs-range" type="range" min="1" max="100000" step="100" data-range="weaponPower"><output data-output="weaponPower"></output></div>' + toggle('oneHit','One-hit hostiles','Set enemies and bosses to one HP') + toggle('killAura','Kill aura','Defeat nearby targets automatically') + '</div><div class="cs-card"><h3>AI & projectiles</h3>' + toggle('freeze','Freeze all AI','Stops enemies and active bosses') + toggle('vacuum','Enemy vacuum','Pull enemies toward the player') + toggle('shield','Projectile shield','Remove enemy shots and hazards') + '</div><div class="cs-card wide"><h3>Arsenal automation</h3>' + toggle('randomArsenal','Random arsenal','Cycle random weapons and arts') + toggle('storm','Cinder aura','Persistent ambient particle field') + '<div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-action="fireworks">Cinderfall effect</button><button class="cs-btn" data-action="clear">Clear active combat</button></div></div></div></section>',
-      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Boss Arena</h3><p class="cs-help">Spawn a boss for a normal player fight, or stage a two-boss exhibition. Exhibition hits are simulated because the game boss AI only targets the player. These encounters do not award boss rewards.</p><div class="cs-fields"><div class="cs-field"><label>First boss</label><select class="cs-select" data-boss-first></select></div><div class="cs-field"><label>Second boss</label><select class="cs-select" data-boss-second></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-boss-action="spawn">Spawn first boss</button><button class="cs-btn primary" data-boss-action="clash">Start boss clash</button><button class="cs-btn wide" data-boss-action="stop">Clear exhibition</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>Choose two bosses to start a clash.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
+      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Boss Arena</h3><p class="cs-help">Add as many arena bosses as you like. You can hit every one of them. In Brawl, they attack each other and you; in Hunt, they all chase you. Their attack loop is simplified to keep multiple bosses stable, and arena defeats do not change story progress. Turn off God mode if you want their hits to hurt you.</p><div class="cs-fields"><div class="cs-field"><label>Boss to add</label><select class="cs-select" data-boss-first></select></div><div class="cs-field"><label>Count per click</label><input class="cs-input" type="number" min="1" max="50" step="1" value="1" data-boss-count></div><div class="cs-field"><label>Fight mode</label><select class="cs-select" data-boss-mode><option value="brawl">Brawl · bosses and player</option><option value="hunt">Hunt · all versus player</option></select></div><div class="cs-field"><label>Second boss for quick clash</label><select class="cs-select" data-boss-second></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="spawn">Add selected bosses</button><button class="cs-btn" data-boss-action="clash">Start two-boss clash</button><button class="cs-btn wide" data-boss-action="stop">Clear arena bosses</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena bosses spawned.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
       '<section class="cs-page" data-page="gear"><div class="cs-pagehead"><div><h2>Professional Weapon Lab</h2><p>Author melee weapons, firearms, shotguns, launchers, and arcane guns with native combat integration.</p></div><span class="cs-badge">Persistent runtime weapons</span></div><form id="cs-weapon-form"><div class="cs-grid"><div class="cs-card wide"><h3>Identity & architecture</h3><div class="cs-fields four"><div class="cs-field"><label>Internal ID</label><input class="cs-input" name="id" value="studio_ember_rifle"></div><div class="cs-field"><label>Display name</label><input class="cs-input" name="name" value="Emberline Rifle"></div><div class="cs-field"><label>Weapon architecture</label><select class="cs-select" name="mode"><option value="melee">Melee only</option><option value="handgun">Handgun</option><option value="rifle" selected>Automatic rifle</option><option value="shotgun">Shotgun</option><option value="launcher">Launcher</option><option value="arcane">Arcane focus</option></select></div><div class="cs-field"><label>Base animation template</label><select class="cs-select" name="template" data-weapon-template></select></div><div class="cs-field"><label>Weapon art</label><select class="cs-select" name="art" data-art-template></select></div><div class="cs-field full"><label>Description</label><input class="cs-input" name="desc" value="A precision firearm authored in Cinderhollow Studio."></div></div></div>',
       '<div class="cs-card"><h3>Melee chassis</h3><div class="cs-fields">' + field('base','Base damage',120) + field('speed','Attack animation speed',1.8) + field('reach','Melee reach',1) + field('stam','Stamina cost',0.2) + field('poise','Melee poise',2) + '</div></div><div class="cs-card"><h3>Elemental melee profile</h3><div class="cs-fields">' + field('fire','Fire multiplier',0) + field('holy','Holy multiplier',0) + field('frost','Frost buildup',0) + field('bleed','Bleed buildup',0) + '</div></div>',
       '<div class="cs-card wide"><h3>Fire control & aiming</h3><div class="cs-fields four"><div class="cs-field"><label>Aim system</label><select class="cs-select" name="aimMode"><option value="directional">Keyboard directional</option><option value="cursor">Mouse cursor</option><option value="nearest">Auto-aim nearest</option><option value="facing">Facing direction</option></select></div><div class="cs-field"><label>Fire trigger</label><select class="cs-select" name="fireTrigger"><option value="light">Basic attack</option><option value="heavy">Heavy attack</option><option value="both">Both attacks</option></select></div><div class="cs-field"><label>Projectile visual</label><select class="cs-select" name="projectileVisual"><option value="ashbolt">Ember round</option><option value="sunspear">Sun spear</option><option value="shard">Arcane shard</option><option value="lance">Blue lance</option><option value="crescent">Blade wave</option><option value="arrow">Physical round</option></select></div><label class="cs-toggle"><div><strong>Full automatic</strong><small>Hold basic attack to keep firing</small></div><input type="checkbox" name="fullAuto" checked></label></div><div class="cs-fields four" style="margin-top:12px">' + field('fireRate','Rounds per second',8) + field('magSize','Magazine size',30) + field('reloadTime','Reload time (seconds)',1.2) + field('shotDamage','Shot damage multiplier',1.4) + field('critChance','Critical chance %',10) + field('critMultiplier','Critical multiplier',2) + field('recoil','Recoil force',25) + field('screenShake','Screen shake',2) + '</div></div>',
@@ -833,6 +859,33 @@
     ].join('');
     document.body.appendChild(root);
     const launcher = document.createElement('button'); launcher.id = 'ch-studio-launch'; launcher.textContent = 'STUDIO'; launcher.classList.toggle('ch-hidden', modState.uiOpen); document.body.appendChild(launcher);
+    const bossHud = document.createElement('div'); bossHud.id = 'ch-boss-stack'; bossHud.className = 'ch-hidden'; bossHud.setAttribute('aria-label', 'Boss health bars'); document.body.appendChild(bossHud);
+    const bossHudRows = new Map();
+    const bossHudTitle = document.createElement('div'); bossHudTitle.className = 'cs-boss-stack-title'; bossHud.appendChild(bossHudTitle);
+    setInterval(() => {
+      const all = studioBossRoom === (room && room.id) ? studioBosses.slice() : [];
+      if (all.length && boss && boss.active && !boss.__studioExhibition) all.unshift(boss);
+      bossHud.classList.toggle('ch-hidden', !all.length);
+      if (!all.length) { for (const row of bossHudRows.values()) row.remove(); bossHudRows.clear(); return; }
+      bossHudTitle.textContent = all.length + (all.length === 1 ? ' boss' : ' bosses') + ' · ' + (studioBossMode === 'brawl' ? 'Brawl' : 'Hunt');
+      const seen = new Set();
+      for (const fighter of all) {
+        const key = fighter.__studioSerial || 'native'; seen.add(key);
+        let row = bossHudRows.get(key);
+        if (!row) {
+          row = document.createElement('div'); row.className = 'cs-boss-hp-row';
+          const label = document.createElement('div'); label.className = 'cs-boss-hp-name';
+          const name = document.createElement('span'), hp = document.createElement('span'); label.append(name, hp);
+          const track = document.createElement('div'); track.className = 'cs-boss-hp-track';
+          const fill = document.createElement('div'); fill.className = 'cs-boss-hp-fill'; track.appendChild(fill); row.append(label, track); bossHudRows.set(key, row); bossHud.appendChild(row);
+        }
+        row.classList.toggle('dead', !fighter.alive);
+        row.children[0].children[0].textContent = fighter.name;
+        row.children[0].children[1].textContent = Math.ceil(fighter.hp) + '/' + Math.ceil(fighter.maxHp);
+        row.children[1].firstChild.style.width = (100 * Math.max(0, fighter.hp) / Math.max(1, fighter.maxHp)).toFixed(1) + '%';
+      }
+      for (const [key, row] of bossHudRows) if (!seen.has(key)) { row.remove(); bossHudRows.delete(key); }
+    }, 200);
     root.addEventListener('pointerdown', e => e.stopPropagation()); root.addEventListener('click', e => e.stopPropagation()); root.addEventListener('keydown', e => { if (e.code !== 'F2' && e.code !== 'Backquote') e.stopPropagation(); });
     const toggleUI = force => { modState.uiOpen = force === undefined ? !modState.uiOpen : !!force; root.classList.toggle('ch-hidden', !modState.uiOpen); launcher.classList.toggle('ch-hidden', modState.uiOpen); saveModState(); if (!modState.uiOpen) setTimeout(() => { try { grabFocus(); view.focus({ preventScroll: true }); } catch (_) {} }, 0); };
     launcher.addEventListener('click', e => { e.stopPropagation(); toggleUI(true); }); root.querySelector('.cs-close').addEventListener('click', () => toggleUI(false));
@@ -847,6 +900,8 @@
 
     const firstBossSelect = root.querySelector('[data-boss-first]');
     const secondBossSelect = root.querySelector('[data-boss-second]');
+    const bossCountInput = root.querySelector('[data-boss-count]');
+    const bossModeSelect = root.querySelector('[data-boss-mode]');
     for (const kind of exhibitionKinds) {
       if (!BOSS_INFO[kind]) continue;
       for (const select of [firstBossSelect, secondBossSelect]) {
@@ -857,21 +912,20 @@
     root.querySelectorAll('[data-boss-action]').forEach(button => button.addEventListener('click', () => {
       const status = root.querySelector('[data-boss-status]');
       try {
-        if (button.dataset.bossAction === 'spawn') spawnStudioBoss(firstBossSelect.value);
-        else if (button.dataset.bossAction === 'clash') startBossClash(firstBossSelect.value, secondBossSelect.value);
-        else { stopBossExhibition(); if (boss && boss.__studioExhibition) boss = null; }
+        if (button.dataset.bossAction === 'spawn') spawnStudioBoss(firstBossSelect.value, bossCountInput.value, bossModeSelect.value);
+        else if (button.dataset.bossAction === 'clash') startBossClash(firstBossSelect.value, secondBossSelect.value, bossModeSelect.value);
+        else stopBossExhibition();
         status.className = 'cs-status ok';
-        status.textContent = button.dataset.bossAction === 'stop' ? 'Exhibition cleared.' : 'Boss encounter started. Close Studio to watch.';
+        status.textContent = button.dataset.bossAction === 'stop' ? 'Arena bosses cleared.' : 'Bosses spawned. Close Studio to join the fight.';
       } catch (error) { status.className = 'cs-status err'; status.textContent = error.message; }
     }));
     setInterval(() => {
       const out = root.querySelector('[data-boss-readout]');
-      const match = bossExhibition;
-      if (!match) { out.textContent = boss && boss.__studioExhibition ? boss.name + ': ' + Math.ceil(boss.hp) + ' / ' + Math.ceil(boss.maxHp) + ' HP' : 'Choose two bosses to start a clash.'; return; }
-      out.innerHTML = '<b>' + match.first.name + '</b> ' + Math.ceil(match.first.hp) + ' / ' + Math.ceil(match.first.maxHp) + ' HP · <b>' + match.second.name + '</b> ' + Math.ceil(match.second.hp) + ' / ' + Math.ceil(match.second.maxHp) + ' HP' + (match.winner ? ' · Winner: ' + match.winner.name : '');
+      const alive = studioBosses.filter(f => f.alive).length;
+      out.textContent = studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioBossMode === 'brawl' ? 'Bosses and player brawl' : 'All bosses hunt player') : 'No arena bosses spawned.';
     }, 300);
 
-    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); const action = button.dataset.action; if (action === 'restore' && P) { P.hp = D.maxHp; P.fp = D.maxFp; P.st = D.maxSt; refillFlasks(); toast('Fully restored'); } if (action === 'clear') { enemies.length = 0; hazards = []; projectiles = projectiles.filter(p => p.owner === 'player'); toast('Room cleared'); } if (action === 'respawn') respawnCurrentRoom(); if (action === 'bosses') { defeatAllBosses(true); saveGame(); } if (action === 'restoreBosses') restoreAllBosses(true); if (action === 'reveal') revealWorld(); if (action === 'currency') { SAVE.cinders = 999999999; SAVE.inv.emberstone = 9999; SAVE.shards = 9999; toast('Economy maximized'); } if (action === 'grant') grantEverything(true); if (action === 'ownership') unlockOwnershipSafely(true); if (action === 'repairAttack') unlockOwnershipSafely(true); if (action === 'fireworks') fireworks(); if (action === 'save') { saveGame(); toast('Changes saved'); } if (action === 'shrine' && P) { respawnAtShrine(SAVE.shrine || (SAVE.shrines[0] || 'R1')); toast('Returned to shrine'); } if (action === 'focusGame') toggleUI(false); if (action === 'resetLoadout') resetLoadout(true); if (action === 'restoreWeapons') restoreWeaponValues(true); if (action === 'normalPlay') restoreNormalGameplay(true); if (action === 'enableRuntime') enableStudioRuntime(); if (action === 'cleanReplay') startCleanReplay(); }));
+    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); const action = button.dataset.action; if (action === 'restore' && P) { P.hp = D.maxHp; P.fp = D.maxFp; P.st = D.maxSt; refillFlasks(); toast('Fully restored'); } if (action === 'clear') { stopBossExhibition(); enemies.length = 0; hazards = []; projectiles = projectiles.filter(p => p.owner === 'player'); toast('Room cleared'); } if (action === 'respawn') respawnCurrentRoom(); if (action === 'bosses') { defeatAllBosses(true); saveGame(); } if (action === 'restoreBosses') restoreAllBosses(true); if (action === 'reveal') revealWorld(); if (action === 'currency') { SAVE.cinders = 999999999; SAVE.inv.emberstone = 9999; SAVE.shards = 9999; toast('Economy maximized'); } if (action === 'grant') grantEverything(true); if (action === 'ownership') unlockOwnershipSafely(true); if (action === 'repairAttack') unlockOwnershipSafely(true); if (action === 'fireworks') fireworks(); if (action === 'save') { saveGame(); toast('Changes saved'); } if (action === 'shrine' && P) { stopBossExhibition(); respawnAtShrine(SAVE.shrine || (SAVE.shrines[0] || 'R1')); toast('Returned to shrine'); } if (action === 'focusGame') toggleUI(false); if (action === 'resetLoadout') resetLoadout(true); if (action === 'restoreWeapons') restoreWeaponValues(true); if (action === 'normalPlay') restoreNormalGameplay(true); if (action === 'enableRuntime') enableStudioRuntime(); if (action === 'cleanReplay') startCleanReplay(); }));
 
     const templateSelect = root.querySelector('[data-weapon-template]'), artSelect = root.querySelector('[data-art-template]');
     templateSelect.innerHTML = Object.keys(WEAPONS).filter(id => !id.startsWith('studio_')).map(id => '<option value="' + id + '">' + WEAPONS[id].name + '</option>').join('');
@@ -1040,6 +1094,7 @@
     if (modState.oneHit) {
       for (const enemy of enemies) if (enemy.alive) enemy.hp = Math.min(enemy.hp, 1);
       if (boss && boss.alive) boss.hp = Math.min(boss.hp, 1);
+      for (const fighter of studioBosses) if (fighter.alive) fighter.hp = Math.min(fighter.hp, 1);
     }
     if (modState.vacuum) {
       for (const enemy of enemies) if (enemy.alive) {
@@ -1050,6 +1105,7 @@
     if (modState.killAura) {
       for (const enemy of enemies) if (enemy.alive && Math.hypot(enemy.x - P.x, enemy.y - P.y) < 260) killThroughGame(enemy);
       if (boss && boss.alive && Math.hypot(boss.x - P.x, boss.y - P.y) < 320) killThroughGame(boss);
+      for (const fighter of studioBosses) if (fighter.alive && Math.hypot(fighter.x - P.x, fighter.y - P.y) < 320) killThroughGame(fighter);
     }
     if (modState.randomArsenal && time >= modState.randomAt) {
       const weapons = Object.keys(WEAPONS), arts = Object.keys(ARTS);
