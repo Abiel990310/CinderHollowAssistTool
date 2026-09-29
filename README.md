@@ -31,6 +31,6 @@ Open F2 → World & Bosses. The picker lists the boss types available in the cur
 - **One-on-One Duel:** Pick the two bosses yourself.
 - **Team Battle Forge:** Build mixed rosters with up to eight named, colored teams. Set 1–50 copies per roster row, player allegiance, player target chance, boss health and damage, fight speed, camera, and friendly fire. Start a new battle or send reinforcements. Team setup is saved locally.
 - **Random Tournament:** Choose 2, 4, 8, or 16 unique random entrants. Matches advance automatically.
-- **Active Arena:** Pause or resume arena AI, heal living fighters, or clear the arena. Every living arena fighter has a separate health bar; bars disappear when that fighter dies.
+- **Active Arena:** Pause or resume arena AI, heal living fighters, or clear the arena. Every living arena fighter has a separate health bar; bars disappear when that fighter dies. Defeated fighters play a short death animation, fade, and leave the arena after about two seconds.
 
 Arena fighters use each boss's original sprite art and available attack animations, with scripted targeting and damage for multi-boss fights. The single native boss mode uses the game's original AI. Arena fights give no story rewards. If a sprite asset is missing, a visible stand-in appears instead. Turn off God mode in Quick Controls if you want their hits to damage you. Arena fights clear when you leave the room or reload.
