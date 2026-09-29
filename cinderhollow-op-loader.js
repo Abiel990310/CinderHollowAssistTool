@@ -301,133 +301,183 @@
 
   // The game has one native boss slot. Arena fighters live beside it so any
   // number can be hit by the player without changing story progression.
-  const exhibitionKinds = ['hound','omen','ice_warden','bellringer','overseer','oswin','champion','scarab'];
   const studioBosses = [];
-  let studioBossRoom = null;
-  let studioBossMode = 'brawl';
-  let studioBossSerial = 0;
-  let studioTournament = null;
-  function makeStudioBoss(kind, x, y) {
-    const fallback = { hound: () => new Hound(x, y), omen: () => new Omen(x, y) };
-    const factory = BOSS_SPAWN[kind];
-    const fighter = factory ? factory(x, y, { kind }) : fallback[kind] && fallback[kind]();
-    if (!fighter || typeof fighter.draw !== 'function' || !fighter.anim || typeof fighter.hit !== 'function') throw new Error('Boss art is unavailable in this build.');
-    fighter.active = true;
-    fighter.introT = 0;
-    fighter.cool = 0.4;
-    fighter.state = 'idle';
+  const teamPalette = ['#dc7553','#7ba9d5','#9ac477','#c29ade','#dec16d','#7bc4bc','#d894a8','#a8a6d6'];
+  const fallbackBossFactories = {
+    hound: (x, y) => new Hound(x, y), omen: (x, y) => new Omen(x, y),
+    kalden: (x, y) => makeKalden(x, y), vessel: (x, y) => makeVessel(x, y),
+    librarian: (x, y) => makeLibrarian(x, y),
+  };
+  const bossKinds = Object.keys(BOSS_INFO).filter(kind => typeof BOSS_SPAWN[kind] === 'function' || fallbackBossFactories[kind]).sort((a, b) => BOSS_INFO[a].name.localeCompare(BOSS_INFO[b].name));
+  const teamStoreKey = 'cinderhollow_op_boss_teams_v1';
+  const defaultTeams = () => ({
+    teams: [
+      { id: 'team1', name: 'Ember', color: teamPalette[0], roster: [{ kind: 'hound', count: 1 }] },
+      { id: 'team2', name: 'Ash', color: teamPalette[1], roster: [{ kind: 'omen', count: 1 }] },
+    ],
+    playerTeam: 'neutral', playerAggro: 35, hpPct: 100, damagePct: 100, friendlyFire: false,
+  });
+  function loadTeamSetup() {
+    let raw; try { raw = JSON.parse(localStorage.getItem(teamStoreKey) || 'null'); } catch (_) {}
+    if (!raw || !Array.isArray(raw.teams)) return defaultTeams();
+    const seen = new Set(), teams = [];
+    for (const item of raw.teams.slice(0, 8)) {
+      if (!item || !Array.isArray(item.roster)) continue;
+      const id = String(item.id || 'team' + (teams.length + 1));
+      if (seen.has(id)) continue;
+      seen.add(id);
+      teams.push({ id, name: String(item.name || 'Team ' + (teams.length + 1)).slice(0, 24), color: /^#[0-9a-fA-F]{6}$/.test(item.color) ? item.color : teamPalette[teams.length],
+        roster: item.roster.filter(row => bossKinds.includes(row.kind)).map(row => ({ kind: row.kind, count: clamp(Math.floor(Number(row.count) || 1), 1, 50) })) });
+    }
+    if (teams.length < 2) return defaultTeams();
+    return { teams, playerTeam: ['neutral','spectator',...teams.map(t => t.id)].includes(raw.playerTeam) ? raw.playerTeam : 'neutral',
+      playerAggro: clamp(Number(raw.playerAggro) || 0, 0, 100), hpPct: clamp(Number(raw.hpPct) || 100, 25, 500),
+      damagePct: clamp(Number(raw.damagePct) || 100, 25, 300), friendlyFire: !!raw.friendlyFire };
+  }
+  let teamSetup = loadTeamSetup();
+  const saveTeamSetup = () => { try { localStorage.setItem(teamStoreKey, JSON.stringify(teamSetup)); } catch (_) {} };
+  let studioBossRoom = null, studioBossSerial = 0, studioTournament = null, studioActiveTeams = [], studioBattleWinner = null;
+  let arenaSettings = { ...teamSetup };
+  function makeStudioBoss(kind, x, y, team) {
+    const factory = BOSS_SPAWN[kind] || fallbackBossFactories[kind];
+    const fighter = factory && factory(x, y, { kind });
+    if (!fighter || typeof fighter.draw !== 'function' || typeof fighter.hit !== 'function') throw new Error(BOSS_INFO[kind].name + ' cannot be spawned in this game build.');
+    fighter.__studioBaseHp = Math.max(1, Number(fighter.maxHp || BOSS_INFO[kind].hp || 1000));
+    fighter.maxHp = fighter.hp = fighter.displayHp = Math.round(fighter.__studioBaseHp * arenaSettings.hpPct / 100);
+    fighter.active = true; fighter.introT = 0; fighter.cool = 0.4; fighter.state = 'idle';
+    if (!fighter.anim) fighter.anim = { done: true, update() {}, set() {} };
     if (fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
     fighter.rewards = () => {};
-    fighter.__studioExhibition = true;
-    fighter.__studioSerial = ++studioBossSerial;
-    fighter.__studioNextHit = 0.5 + Math.random() * 0.6;
-    fighter.__studioAimAt = 0;
-    fighter.__studioSwing = 0;
+    fighter.__studioExhibition = true; fighter.__studioSerial = ++studioBossSerial;
+    fighter.__studioTeam = team.id; fighter.__studioTeamName = team.name; fighter.__studioTeamColor = team.color;
+    fighter.__studioNextHit = 0.5 + Math.random() * 0.6; fighter.__studioAimAt = 0; fighter.__studioSwing = 0;
+    const nativeHurtbox = typeof fighter.hurtbox === 'function' ? fighter.hurtbox.bind(fighter) : null;
+    fighter.hurtbox = () => { let hit = null; try { hit = nativeHurtbox && nativeHurtbox(); } catch (_) {} return hit || rect(fighter.x - 35, fighter.y - 78, fighter.x + 35, fighter.y); };
+    fighter.hit = info => {
+      if (!fighter.alive) return;
+      const damage = Math.max(0, Math.round(Number(info && info.dmg) || 0));
+      fighter.hp = Math.max(0, fighter.hp - damage); fighter.flash = 0.75;
+      fighter.dmgShown = damage; fighter.dmgT = 1.4;
+      if (fighter.hp <= 0) fighter.die();
+    };
     fighter.die = () => {
       if (fighter.state === 'dead') return;
       fighter.hp = 0; fighter.state = 'dead'; fighter.active = false;
       if (fighter.sh && fighter.sh.has('death')) fighter.anim.set('death', false, 1);
+      if (fighter.parts) for (const part of fighter.parts) { part.state = 'dead'; if (part.anim && part.sh && part.sh.has('death')) part.anim.set('death', false, 1); }
     };
     return fighter;
   }
   function stopBossExhibition() {
-    studioBosses.length = 0;
-    studioBossRoom = null;
-    studioTournament = null;
+    studioBosses.length = 0; studioBossRoom = null; studioTournament = null; studioActiveTeams = []; studioBattleWinner = null;
   }
-  function spawnStudioBoss(kind, count = 1, mode = studioBossMode) {
+  function spawnTeamFighters(teams) {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
-    if (!exhibitionKinds.includes(kind)) throw new Error('Choose a supported boss.');
-    studioTournament = null;
-    count = Math.floor(Number(count));
-    if (!Number.isFinite(count) || count < 1 || count > 50) throw new Error('Spawn 1–50 per click. You can click again to add more.');
-    if (studioBossRoom && studioBossRoom !== room.id) stopBossExhibition();
+    const planned = teams.reduce((sum, team) => sum + team.roster.reduce((n, row) => n + row.count, 0), 0);
+    if (!planned) throw new Error('Add at least one boss to a team first.');
     studioBossRoom = room.id;
-    studioBossMode = mode === 'hunt' ? 'hunt' : 'brawl';
-    let created = 0;
-    for (let i = 0; i < count; i++) {
-      const ring = studioBosses.length;
-      const offset = (ring % 2 ? -1 : 1) * (110 + (ring % 7) * 32);
-      const x = clamp(P.x + offset, TILE + 25, room.pw - TILE - 25);
-      const fighter = makeStudioBoss(kind, x, P.y);
-      studioBosses.push(fighter);
-      created++;
+    const areaLeft = TILE + 42, areaWidth = Math.max(80, room.pw - 2 * areaLeft);
+    for (let ti = 0; ti < teams.length; ti++) {
+      const team = teams[ti], baseX = areaLeft + areaWidth * (ti + 0.5) / teams.length;
+      let slot = 0;
+      for (const row of team.roster) for (let n = 0; n < row.count; n++) {
+        const x = clamp(baseX + ((slot % 5) - 2) * 20, TILE + 25, room.pw - TILE - 25);
+        const fighter = makeStudioBoss(row.kind, x, P.y, team);
+        studioBosses.push(fighter); slot++;
+      }
     }
-    toast(created + ' ' + BOSS_INFO[kind].name + (created === 1 ? ' enters' : ' enter') + ' the arena', 3);
+    for (const team of teams) {
+      const active = studioActiveTeams.find(t => t.id === team.id);
+      if (active) { active.name = team.name; active.color = team.color; }
+      else studioActiveTeams.push({ id: team.id, name: team.name, color: team.color });
+    }
+    studioBattleWinner = null;
+    return planned;
   }
-  function startBossClash(firstKind, secondKind, mode = 'brawl') {
-    if (!exhibitionKinds.includes(firstKind) || !exhibitionKinds.includes(secondKind)) throw new Error('Choose supported bosses.');
+  function startTeamBattle(reinforce = false) {
+    const ready = teamSetup.teams.filter(team => team.roster.length && team.roster.some(row => row.count > 0));
+    if (!ready.length) throw new Error('Add at least one boss to a team.');
+    if (ready.length === 1 && ['spectator', ready[0].id].includes(teamSetup.playerTeam)) throw new Error('Set Player side to Neutral for a one-team survival fight.');
+    if (!reinforce || studioBossRoom !== (room && room.id)) stopBossExhibition();
+    else studioTournament = null;
+    arenaSettings = { ...teamSetup };
+    const before = studioBosses.length;
+    let count;
+    try { count = spawnTeamFighters(ready); } catch (error) { studioBosses.length = before; if (!before) studioBossRoom = null; throw error; }
+    toast((reinforce ? 'Reinforcements: ' : 'Team battle: ') + count + ' bosses across ' + ready.length + ' teams', 4);
+  }
+  function startBossClash(firstKind, secondKind) {
     stopBossExhibition();
-    spawnStudioBoss(firstKind, 1, mode);
-    spawnStudioBoss(secondKind, 1, mode);
+    arenaSettings = { ...teamSetup, playerTeam: 'spectator', playerAggro: 0 };
+    spawnTeamFighters([
+      { id: 'bracketA', name: 'Ember', color: teamPalette[0], roster: [{ kind: firstKind, count: 1 }] },
+      { id: 'bracketB', name: 'Ash', color: teamPalette[1], roster: [{ kind: secondKind, count: 1 }] },
+    ]);
   }
   function startBossTournament() {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
-    const queue = exhibitionKinds.slice();
+    const queue = bossKinds.slice();
+    if (queue.length < 2) throw new Error('This game build has too few spawnable bosses.');
     for (let i = queue.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [queue[i], queue[j]] = [queue[j], queue[i]]; }
-    const bracket = { queue, winners: [], round: 1, pair: 0, nextAt: 0, champion: null };
+    queue.length = queue.length >= 8 ? 8 : queue.length >= 4 ? 4 : 2;
+    const bracket = { queue, winners: [], round: 1, totalRounds: Math.log2(queue.length), pair: 0, nextAt: 0 };
     const first = bracket.queue.shift(), second = bracket.queue.shift();
-    startBossClash(first, second, 'brawl');
-    bracket.pair = 1;
-    studioTournament = bracket;
-    toast('Boss Tournament · round 1 of 3', 4);
+    startBossClash(first, second); bracket.pair = 1; studioTournament = bracket;
+    toast('Boss Tournament · round 1 of ' + bracket.totalRounds, 4);
   }
   function updateBossTournament() {
     const bracket = studioTournament;
-    if (!bracket || studioBosses.length !== 2) return;
-    if (studioBosses.every(f => f.alive)) return;
+    if (!bracket || studioBosses.length !== 2 || studioBosses.every(f => f.alive)) return;
     if (!bracket.nextAt) {
       const winner = studioBosses.find(f => f.alive) || studioBosses[0];
-      bracket.winners.push(winner.kind);
-      bracket.nextAt = time + 2;
-      toast(winner.name + ' advances', 2);
-      return;
+      bracket.winners.push(winner.kind); bracket.nextAt = time + 2; toast(winner.name + ' advances', 2); return;
     }
     if (time < bracket.nextAt) return;
     if (!bracket.queue.length) {
-      if (bracket.winners.length === 1) {
-        bracket.champion = bracket.winners[0];
-        toast('Tournament champion: ' + BOSS_INFO[bracket.champion].name, 6);
-        studioTournament = null;
-        return;
-      }
-      bracket.queue = bracket.winners.splice(0);
-      bracket.round++;
-      bracket.pair = 0;
+      if (bracket.winners.length === 1) { toast('Tournament champion: ' + BOSS_INFO[bracket.winners[0]].name, 6); studioTournament = null; return; }
+      bracket.queue = bracket.winners.splice(0); bracket.round++; bracket.pair = 0;
     }
     const first = bracket.queue.shift(), second = bracket.queue.shift();
-    startBossClash(first, second, 'brawl');
-    bracket.pair++;
-    bracket.nextAt = 0;
-    studioTournament = bracket;
+    startBossClash(first, second); bracket.pair++; bracket.nextAt = 0; studioTournament = bracket;
     toast('Tournament round ' + bracket.round + ' · match ' + bracket.pair, 3);
   }
   const nativeTargets = targets;
   targets = function studioTargets() {
     const list = nativeTargets();
-    for (const fighter of studioBosses) if (fighter.alive && fighter.active) list.push(fighter);
+    for (const fighter of studioBosses) if (fighter.alive && fighter.active && (arenaSettings.friendlyFire || arenaSettings.playerTeam !== fighter.__studioTeam)) list.push(fighter);
     return list;
   };
   function updateBossClash(dt) {
     if (!studioBosses.length) return;
     if (state !== 'play' || !room || room.id !== studioBossRoom) { stopBossExhibition(); return; }
     dt = (Number(dt) || 1 / 60) * modState.bossFightSpeed / 100;
-    const living = studioBosses.filter(f => f.alive);
+    const living = studioBosses.filter(f => f.alive && f.hp > 0);
     for (const fighter of studioBosses) {
       fighter.anim.update(dt);
+      if (fighter.kind === 'twins' && fighter.parts) for (const part of fighter.parts) if (part.anim) part.anim.update(dt);
       fighter.flash = Math.max(0, (fighter.flash || 0) - dt * 4);
       fighter.displayHp += (fighter.hp - fighter.displayHp) * Math.min(1, dt * 5);
       if (!fighter.alive) continue;
-      const others = living.filter(f => f !== fighter);
-      const nearest = others.reduce((best, candidate) => !best || Math.abs(candidate.x - fighter.x) < Math.abs(best.x - fighter.x) ? candidate : best, null);
-      if (time >= fighter.__studioAimAt || (fighter.__studioTarget && fighter.__studioTarget !== P && !fighter.__studioTarget.alive)) {
-        fighter.__studioTarget = studioBossMode === 'brawl' && nearest && Math.random() < 0.68 ? nearest : P;
+      const opponents = living.filter(f => f.__studioTeam !== fighter.__studioTeam);
+      const nearest = opponents.reduce((best, candidate) => !best || Math.abs(candidate.x - fighter.x) < Math.abs(best.x - fighter.x) ? candidate : best, null);
+      const playerEligible = arenaSettings.playerTeam !== 'spectator' && arenaSettings.playerTeam !== fighter.__studioTeam && P.state !== 'dead';
+      const oldTarget = fighter.__studioTarget;
+      if (time >= fighter.__studioAimAt || (oldTarget && oldTarget !== P && !oldTarget.alive) || (oldTarget === P && !playerEligible)) {
+        fighter.__studioTarget = playerEligible && (!nearest || Math.random() * 100 < arenaSettings.playerAggro) ? P : nearest;
         fighter.__studioAimAt = time + 1.1;
       }
-      const target = fighter.__studioTarget || P;
+      const target = fighter.__studioTarget;
+      if (!target) continue;
       const distance = Math.abs(target.x - fighter.x);
       fighter.face = target.x < fighter.x ? -1 : 1;
-      if (distance > 72) fighter.x = clamp(fighter.x + fighter.face * 62 * dt, TILE + 25, room.pw - TILE - 25);
+      if (distance > 72) {
+        const dx = fighter.face * 62 * dt;
+        const nextX = clamp(fighter.x + dx, TILE + 25, room.pw - TILE - 25);
+        const moved = nextX - fighter.x;
+        fighter.x = nextX;
+        if (fighter.parts) for (const part of fighter.parts) if (Number.isFinite(part.x)) part.x += moved;
+        if (fighter.spine) for (const point of fighter.spine) if (Number.isFinite(point.x)) point.x += moved;
+      }
       fighter.__studioSwing = Math.max(0, fighter.__studioSwing - dt);
       fighter.__studioNextHit -= dt;
       if (fighter.__studioNextHit <= 0 && distance < 115) {
@@ -436,18 +486,23 @@
         const tags = ['attack','bite','sweep','combo','thrust','slash','strike'];
         const tag = fighter.sh && tags.find(t => fighter.sh.has(t));
         if (tag) fighter.anim.set(tag, false, 1.25);
-        const damage = Math.max(28, Math.round(fighter.maxHp * (0.035 + Math.random() * 0.02)));
+        const damage = Math.max(14, Math.round(fighter.__studioBaseHp * (0.035 + Math.random() * 0.02) * arenaSettings.damagePct / 100));
         if (target === P) {
-          hurtPlayer(Math.min(60, damage * 0.4), fighter.face, ++hazardId, { src: fighter, parryable: true });
+          hurtPlayer(Math.min(90, damage * 0.4), fighter.face, ++hazardId, { src: fighter, parryable: true });
         } else if (target.alive) {
-          target.hp = Math.max(0, target.hp - damage);
-          target.flash = 0.7; target.dmgShown = damage; target.dmgT = 1.5;
+          target.hit({ dmg: damage, x: target.x, y: target.y - 35, dir: fighter.face, poise: 0 });
           spawnFx('hit', target.x, target.y - 35, fighter.face);
-          if (target.hp <= 0) target.die();
         }
         shake = Math.max(shake, 2);
       }
       if (fighter.__studioSwing <= 0 && fighter.anim.done && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
+    }
+    if (!studioBattleWinner && !studioTournament && studioActiveTeams.length > 1) {
+      const aliveTeams = new Set(studioBosses.filter(f => f.alive && f.hp > 0).map(f => f.__studioTeam));
+      if (aliveTeams.size === 1) {
+        const winningId = [...aliveTeams][0]; studioBattleWinner = studioActiveTeams.find(t => t.id === winningId);
+        if (studioBattleWinner) toast(studioBattleWinner.name + ' wins the team battle', 5);
+      }
     }
   }
   HOOKS.update.push(updateBossClash);
@@ -877,6 +932,8 @@
       '.cs-toggle{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #242930}.cs-toggle:last-child{border:0}.cs-toggle>div{flex:1}.cs-toggle strong{display:block;font-size:12px;font-weight:600}.cs-toggle small{color:#737d88;font-size:10px}.cs-toggle input{appearance:none;width:34px;height:18px;border-radius:20px;background:#343a43;position:relative;cursor:pointer}.cs-toggle input:after{content:"";position:absolute;width:12px;height:12px;left:3px;top:3px;border-radius:50%;background:#9da5ae;transition:.16s}.cs-toggle input:checked{background:#8f7040}.cs-toggle input:checked:after{left:19px;background:#f5deb4}',
       '.cs-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.cs-btn{min-height:34px;padding:7px 10px;border:1px solid #343a43;border-radius:6px;background:#1b2027;color:#c9ced4;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.cs-btn:hover{border-color:#706044;background:#222831;color:#f1d9ac}.cs-btn.primary{background:#8a6a38;border-color:#a4834e;color:#fff4df}.cs-btn.danger{border-color:#694749;color:#e3b6b8}.cs-btn.wide{grid-column:1/-1}',
       '.cs-duel-readout{margin-top:8px;padding:9px;border:1px solid #323940;border-radius:6px;background:#10151b;color:#c8d0d7;font-size:11px;line-height:1.6}.cs-duel-readout b{color:#f0d29b}',
+      '.cs-team-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:10px;color:#9ba5af;font-size:10px}.cs-team-toolbar>div{display:flex;gap:6px}.cs-team-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.cs-team-card{border:1px solid #313841;border-left:3px solid var(--team-color);border-radius:6px;background:#10151b;padding:10px;min-width:0}.cs-team-head{display:flex;gap:7px;align-items:center;margin-bottom:8px}.cs-team-head .cs-input{font-weight:700}.cs-team-head .cs-btn{flex:none}.cs-team-roster{display:grid;gap:5px;margin-bottom:8px}.cs-team-row{display:grid;grid-template-columns:minmax(0,1fr) 62px 28px;gap:5px;align-items:center}.cs-team-row span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#cdd4dc;font-size:11px}.cs-team-row input{text-align:right}.cs-team-row .cs-mini{color:#d99da0}.cs-team-add{display:grid;grid-template-columns:minmax(0,1fr) 62px 45px;gap:5px}.cs-team-empty{color:#717d89;font-size:10px;padding:6px 0}.cs-team-card .cs-select,.cs-team-card .cs-input{min-width:0}@media(max-width:760px){.cs-team-list{grid-template-columns:1fr}.cs-team-toolbar{align-items:flex-start;flex-direction:column}}',
+      '.cs-team-head input[type=color]{width:30px;height:30px;flex:none;padding:2px;border:1px solid #39414a;border-radius:5px;background:#171d24;cursor:pointer}.cs-team-head input[type=color]::-webkit-color-swatch-wrapper{padding:0}.cs-team-head input[type=color]::-webkit-color-swatch{border:0;border-radius:3px}',
       '#ch-boss-stack{position:fixed;right:18px;top:60px;z-index:2147483645;width:min(280px,36vw);max-height:55vh;overflow:auto;padding:9px;border:1px solid #5f4540;border-radius:8px;background:#0c0b10e8;box-shadow:0 12px 32px #000b;color:#f2e5d5;font:600 11px Inter,Segoe UI,sans-serif}#ch-boss-stack.ch-hidden{display:none}.cs-boss-stack-title{padding:1px 3px 8px;color:#e8bd81;letter-spacing:.08em;text-transform:uppercase;font-size:10px}.cs-boss-hp-row{margin:0 2px 8px}.cs-boss-hp-name{display:flex;justify-content:space-between;gap:8px;margin-bottom:3px}.cs-boss-hp-name span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.cs-boss-hp-name span:last-child{flex:none;color:#b7a99a;font:10px Consolas,monospace}.cs-boss-hp-track{height:7px;border:1px solid #754d3f;background:#28171b;overflow:hidden}.cs-boss-hp-fill{height:100%;background:linear-gradient(90deg,#9f2937,#d15b48);transition:width .15s}.cs-boss-hp-row.dead{opacity:.43}',
       '.cs-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.cs-fields.four{grid-template-columns:repeat(4,minmax(0,1fr))}.cs-field{display:flex;flex-direction:column;gap:4px}.cs-field.full{grid-column:1/-1}.cs-field label{color:#7f8994;font-size:9px;text-transform:uppercase;letter-spacing:.08em}.cs-input,.cs-select,.cs-textarea{width:100%;border:1px solid #343a43;border-radius:5px;background:#0e1217;color:#dce0e4;padding:8px 9px;font:500 12px Inter,Segoe UI,sans-serif;outline:none}.cs-input:focus,.cs-select:focus,.cs-textarea:focus{border-color:#8d754d;box-shadow:0 0 0 2px #8d754d22}.cs-textarea{min-height:300px;resize:vertical;font:11px/1.45 Consolas,monospace;user-select:text}.cs-range{width:100%;accent-color:#a98145}.cs-status{min-height:18px;margin-top:8px;color:#a8b0b8;font-size:10px}.cs-status.ok{color:#9fc49d}.cs-status.err{color:#e19a9e}',
       '.cs-setting-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.cs-setting{display:flex;align-items:center;gap:8px;padding:9px;border:1px solid #292f36;border-radius:6px;background:#12161b}.cs-setting label{flex:1;color:#aeb5bd;font-size:11px}.cs-setting input[type=number],.cs-setting input[type=text]{width:105px}.cs-tablebar{display:flex;gap:8px;margin-bottom:9px}.cs-tablebar>*{flex:1}.cs-kbd{display:inline-block;min-width:22px;padding:2px 5px;border:1px solid #3b4149;border-bottom-color:#59616b;border-radius:4px;background:#1b2027;color:#c9cfd5;text-align:center;font:600 10px Consolas}',
@@ -902,7 +959,7 @@
       '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting. Zoom out as far as 5×.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="500" step="10" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
       '<section class="cs-page" data-page="inventory"><div class="cs-pagehead"><div><h2>Inventory & Progression</h2><p>Currency, flasks, materials, skills, spells, and equipment ownership.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Economy</h3><div class="cs-fields">' + field('cinders','Cinders',SAVE.cinders) + field('shards','Skill shards',SAVE.shards) + field('emberstone','Emberstone',SAVE.inv.emberstone || 0) + '</div></div><div class="cs-card"><h3>Flasks</h3><div class="cs-fields">' + field('flaskBase','Total charges',SAVE.flaskBase) + field('flaskBlue','Azure allocation',SAVE.flaskBlue) + field('flaskPot','Flask potency',SAVE.flaskPot) + '</div></div><div class="cs-card wide"><h3>Ownership</h3><div class="cs-actions"><button class="cs-btn" data-action="ownership">Safely unlock all gear, skills and charms</button><button class="cs-btn" data-action="currency">Max currencies and materials</button><button class="cs-btn" data-action="save">Commit inventory to save</button><button class="cs-btn" data-action="fireworks">Preview reward effect</button></div><p class="cs-help" style="margin-top:10px">Preserves the equipped loadout and follows the game’s mutually exclusive skill-tree rules.</p></div></div></section>',
       '<section class="cs-page" data-page="combat"><div class="cs-pagehead"><div><h2>Combat Systems</h2><p>Damage, AI control, defensive automation, and arsenal behavior.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Damage model</h3><div class="cs-field"><label>Global weapon base power</label><input class="cs-range" type="range" min="1" max="100000" step="100" data-range="weaponPower"><output data-output="weaponPower"></output></div>' + toggle('oneHit','One-hit hostiles','Set enemies and bosses to one HP') + toggle('killAura','Kill aura','Defeat nearby targets automatically') + '</div><div class="cs-card"><h3>AI & projectiles</h3>' + toggle('freeze','Freeze all AI','Stops enemies and active bosses') + toggle('vacuum','Enemy vacuum','Pull enemies toward the player') + toggle('shield','Projectile shield','Remove enemy shots and hazards') + '</div><div class="cs-card wide"><h3>Arsenal automation</h3>' + toggle('randomArsenal','Random arsenal','Cycle random weapons and arts') + toggle('storm','Cinder aura','Persistent ambient particle field') + '<div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-action="fireworks">Cinderfall effect</button><button class="cs-btn" data-action="clear">Clear active combat</button></div></div></div></section>',
-      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Boss Arena</h3><p class="cs-help">Add as many arena bosses as you like. You can hit every one of them. In Brawl, they attack each other and you; in Hunt, they all chase you. Their attack loop is simplified to keep multiple bosses stable, and arena defeats do not change story progress. Turn off God mode if you want their hits to hurt you.</p><div class="cs-fields"><div class="cs-field"><label>Boss to add</label><select class="cs-select" data-boss-first></select></div><div class="cs-field"><label>Count per click</label><input class="cs-input" type="number" min="1" max="50" step="1" value="1" data-boss-count></div><div class="cs-field"><label>Fight mode</label><select class="cs-select" data-boss-mode><option value="brawl">Brawl · bosses and player</option><option value="hunt">Hunt · all versus player</option></select></div><div class="cs-field"><label>Second boss for quick clash</label><select class="cs-select" data-boss-second></select></div></div><div class="cs-fields" style="margin-top:12px"><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow boss fight</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="spawn">Add selected bosses</button><button class="cs-btn" data-boss-action="clash">Start two-boss clash</button><button class="cs-btn" data-boss-action="tournament">Start 8-boss tournament</button><button class="cs-btn" data-boss-action="stop">Clear arena bosses</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena bosses spawned.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
+      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Boss Battle Forge</h3><p class="cs-help">Build mixed boss rosters, then launch a team battle. Arena fighters use simplified attacks, remain hittable by the player, and give no story rewards.</p><div class="cs-team-toolbar"><span data-boss-catalog-count></span><div><button class="cs-btn" data-team-action="add">+ Add team</button><button class="cs-btn" data-team-action="reset">Reset setup</button></div></div><div class="cs-team-list" data-team-list></div><div class="cs-fields four" style="margin-top:14px"><div class="cs-field"><label>Player side</label><select class="cs-select" data-team-player></select></div><div class="cs-field"><label>Player target chance</label><input class="cs-range" type="range" min="0" max="100" step="5" data-team-setting="playerAggro"><output data-team-output="playerAggro"></output></div><div class="cs-field"><label>Boss health</label><input class="cs-range" type="range" min="25" max="500" step="25" data-team-setting="hpPct"><output data-team-output="hpPct"></output></div><div class="cs-field"><label>Boss damage</label><input class="cs-range" type="range" min="25" max="300" step="25" data-team-setting="damagePct"><output data-team-output="damagePct"></output></div><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow arena</option></select></div><div class="cs-field full"><label class="cs-toggle"><div><strong>Friendly fire</strong><small>Your attacks can damage your own team when enabled.</small></div><input type="checkbox" data-team-friendly></label></div></div><div class="cs-actions" style="margin-top:12px"><button class="cs-btn primary" data-boss-action="start">Start team battle</button><button class="cs-btn" data-boss-action="reinforce">Send reinforcements</button><button class="cs-btn" data-boss-action="tournament">Random boss tournament</button><button class="cs-btn danger" data-boss-action="stop">Clear arena</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena battle running.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
       '<section class="cs-page" data-page="gear"><div class="cs-pagehead"><div><h2>Professional Weapon Lab</h2><p>Author melee weapons, firearms, shotguns, launchers, and arcane guns with native combat integration.</p></div><span class="cs-badge">Persistent runtime weapons</span></div><form id="cs-weapon-form"><div class="cs-grid"><div class="cs-card wide"><h3>Identity & architecture</h3><div class="cs-fields four"><div class="cs-field"><label>Internal ID</label><input class="cs-input" name="id" value="studio_ember_rifle"></div><div class="cs-field"><label>Display name</label><input class="cs-input" name="name" value="Emberline Rifle"></div><div class="cs-field"><label>Weapon architecture</label><select class="cs-select" name="mode"><option value="melee">Melee only</option><option value="handgun">Handgun</option><option value="rifle" selected>Automatic rifle</option><option value="shotgun">Shotgun</option><option value="launcher">Launcher</option><option value="arcane">Arcane focus</option></select></div><div class="cs-field"><label>Base animation template</label><select class="cs-select" name="template" data-weapon-template></select></div><div class="cs-field"><label>Weapon art</label><select class="cs-select" name="art" data-art-template></select></div><div class="cs-field full"><label>Description</label><input class="cs-input" name="desc" value="A precision firearm authored in Cinderhollow Studio."></div></div></div>',
       '<div class="cs-card"><h3>Melee chassis</h3><div class="cs-fields">' + field('base','Base damage',120) + field('speed','Attack animation speed',1.8) + field('reach','Melee reach',1) + field('stam','Stamina cost',0.2) + field('poise','Melee poise',2) + '</div></div><div class="cs-card"><h3>Elemental melee profile</h3><div class="cs-fields">' + field('fire','Fire multiplier',0) + field('holy','Holy multiplier',0) + field('frost','Frost buildup',0) + field('bleed','Bleed buildup',0) + '</div></div>',
       '<div class="cs-card wide"><h3>Fire control & aiming</h3><div class="cs-fields four"><div class="cs-field"><label>Aim system</label><select class="cs-select" name="aimMode"><option value="directional">Keyboard directional</option><option value="cursor">Mouse cursor</option><option value="nearest">Auto-aim nearest</option><option value="facing">Facing direction</option></select></div><div class="cs-field"><label>Fire trigger</label><select class="cs-select" name="fireTrigger"><option value="light">Basic attack</option><option value="heavy">Heavy attack</option><option value="both">Both attacks</option></select></div><div class="cs-field"><label>Projectile visual</label><select class="cs-select" name="projectileVisual"><option value="ashbolt">Ember round</option><option value="sunspear">Sun spear</option><option value="shard">Arcane shard</option><option value="lance">Blue lance</option><option value="crescent">Blade wave</option><option value="arrow">Physical round</option></select></div><label class="cs-toggle"><div><strong>Full automatic</strong><small>Hold basic attack to keep firing</small></div><input type="checkbox" name="fullAuto" checked></label></div><div class="cs-fields four" style="margin-top:12px">' + field('fireRate','Rounds per second',8) + field('magSize','Magazine size',30) + field('reloadTime','Reload time (seconds)',1.2) + field('shotDamage','Shot damage multiplier',1.4) + field('critChance','Critical chance %',10) + field('critMultiplier','Critical multiplier',2) + field('recoil','Recoil force',25) + field('screenShake','Screen shake',2) + '</div></div>',
@@ -927,7 +984,7 @@
       if (all.length && boss && boss.active && boss.alive && boss.hp > 0 && !boss.__studioExhibition) all.unshift(boss);
       bossHud.classList.toggle('ch-hidden', !all.length);
       if (!all.length) { for (const row of bossHudRows.values()) row.remove(); bossHudRows.clear(); return; }
-      bossHudTitle.textContent = all.length + (all.length === 1 ? ' boss' : ' bosses') + ' · ' + (studioBossMode === 'brawl' ? 'Brawl' : 'Hunt');
+      bossHudTitle.textContent = all.length + (all.length === 1 ? ' fighter' : ' fighters') + ' · ' + studioActiveTeams.length + (studioActiveTeams.length === 1 ? ' team' : ' teams');
       const seen = new Set();
       for (const fighter of all) {
         const key = fighter.__studioSerial || 'native'; seen.add(key);
@@ -939,8 +996,9 @@
           const track = document.createElement('div'); track.className = 'cs-boss-hp-track';
           const fill = document.createElement('div'); fill.className = 'cs-boss-hp-fill'; track.appendChild(fill); row.append(label, track); bossHudRows.set(key, row); bossHud.appendChild(row);
         }
-        row.children[0].children[0].textContent = fighter.name;
+        row.children[0].children[0].textContent = fighter.__studioTeamName ? fighter.__studioTeamName + ' · ' + fighter.name : fighter.name;
         row.children[0].children[1].textContent = Math.ceil(fighter.hp) + '/' + Math.ceil(fighter.maxHp);
+        row.children[1].firstChild.style.background = fighter.__studioTeamColor || '#a93a43';
         row.children[1].firstChild.style.width = (100 * Math.max(0, fighter.hp) / Math.max(1, fighter.maxHp)).toFixed(1) + '%';
       }
       for (const [key, row] of bossHudRows) if (!seen.has(key)) { row.remove(); bossHudRows.delete(key); }
@@ -957,35 +1015,80 @@
     root.querySelectorAll('[data-page="player"] input[name=hp],[data-page="player"] input[name=fp],[data-page="player"] input[name=st]').forEach(input => input.addEventListener('change', () => { if (P) P[input.name] = Number(input.value) || 0; }));
     root.querySelectorAll('[data-page="inventory"] input').forEach(input => input.addEventListener('change', () => { const value = Number(input.value) || 0; if (input.name === 'emberstone') SAVE.inv.emberstone = value; else SAVE[input.name] = value; saveGame(); }));
 
-    const firstBossSelect = root.querySelector('[data-boss-first]');
-    const secondBossSelect = root.querySelector('[data-boss-second]');
-    const bossCountInput = root.querySelector('[data-boss-count]');
-    const bossModeSelect = root.querySelector('[data-boss-mode]');
+    const teamList = root.querySelector('[data-team-list]');
+    const playerSideSelect = root.querySelector('[data-team-player]');
     const bossCameraSelect = root.querySelector('[data-boss-camera]');
+    const bossStatus = root.querySelector('[data-boss-status]');
+    root.querySelector('[data-boss-catalog-count]').textContent = bossKinds.length + ' boss types available in this build';
     bossCameraSelect.value = modState.bossCamera;
     bossCameraSelect.addEventListener('change', () => { modState.bossCamera = bossCameraSelect.value; saveModState(); });
-    for (const kind of exhibitionKinds) {
-      if (!BOSS_INFO[kind]) continue;
-      for (const select of [firstBossSelect, secondBossSelect]) {
-        const option = document.createElement('option'); option.value = kind; option.textContent = BOSS_INFO[kind].name; select.appendChild(option);
+    function renderPlayerSides() {
+      playerSideSelect.replaceChildren();
+      for (const [value, label] of [['neutral','Neutral · everyone may attack you'],['spectator','Spectator · bosses ignore you'],...teamSetup.teams.map(t => [t.id,'Join ' + t.name])]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = label; playerSideSelect.appendChild(option);
       }
+      playerSideSelect.value = teamSetup.playerTeam;
     }
-    secondBossSelect.value = 'omen';
+    function renderTeamEditor() {
+      teamList.replaceChildren();
+      for (const team of teamSetup.teams) {
+        const card = document.createElement('div'); card.className = 'cs-team-card'; card.style.setProperty('--team-color', team.color);
+        card.innerHTML = '<div class="cs-team-head"><input type="color" data-team-color aria-label="Team color"><input class="cs-input" data-team-name maxlength="24" aria-label="Team name"><button class="cs-btn danger" data-remove-team title="Remove team">Remove</button></div><div class="cs-team-roster" data-team-roster></div><div class="cs-team-add"><select class="cs-select" data-team-kind aria-label="Boss type"></select><input class="cs-input" type="number" min="1" max="50" value="1" data-team-count aria-label="Count"><button class="cs-btn" data-add-boss title="Add boss to team">Add</button></div>';
+        const colorInput = card.querySelector('[data-team-color]'); colorInput.value = team.color; colorInput.addEventListener('input', () => { team.color = colorInput.value; card.style.setProperty('--team-color', team.color); saveTeamSetup(); for (const fighter of studioBosses) if (fighter.__studioTeam === team.id) fighter.__studioTeamColor = team.color; });
+        const nameInput = card.querySelector('[data-team-name]'); nameInput.value = team.name;
+        nameInput.addEventListener('change', () => { team.name = nameInput.value.trim().slice(0, 24) || 'Team'; nameInput.value = team.name; for (const fighter of studioBosses) if (fighter.__studioTeam === team.id) fighter.__studioTeamName = team.name; const activeTeam = studioActiveTeams.find(t => t.id === team.id); if (activeTeam) activeTeam.name = team.name; saveTeamSetup(); renderPlayerSides(); });
+        card.querySelector('[data-remove-team]').disabled = teamSetup.teams.length <= 2;
+        card.querySelector('[data-remove-team]').addEventListener('click', () => { if (teamSetup.teams.length <= 2) return; teamSetup.teams = teamSetup.teams.filter(t => t !== team); if (teamSetup.playerTeam === team.id) teamSetup.playerTeam = 'neutral'; saveTeamSetup(); renderTeamEditor(); });
+        const roster = card.querySelector('[data-team-roster]');
+        if (!team.roster.length) { const empty = document.createElement('div'); empty.className = 'cs-team-empty'; empty.textContent = 'No bosses yet. Add one below.'; roster.appendChild(empty); }
+        for (const row of team.roster) {
+          const line = document.createElement('div'); line.className = 'cs-team-row';
+          const label = document.createElement('span'); label.textContent = BOSS_INFO[row.kind]?.name || row.kind; label.title = label.textContent;
+          const amount = document.createElement('input'); amount.className = 'cs-input'; amount.type = 'number'; amount.min = '1'; amount.max = '50'; amount.value = row.count; amount.setAttribute('aria-label', 'Count for ' + label.textContent);
+          amount.addEventListener('change', () => { row.count = clamp(Math.floor(Number(amount.value) || 1), 1, 50); amount.value = row.count; saveTeamSetup(); });
+          const remove = document.createElement('button'); remove.className = 'cs-mini'; remove.textContent = '×'; remove.title = 'Remove boss'; remove.addEventListener('click', () => { team.roster.splice(team.roster.indexOf(row), 1); saveTeamSetup(); renderTeamEditor(); });
+          line.append(label, amount, remove); roster.appendChild(line);
+        }
+        const kindSelect = card.querySelector('[data-team-kind]');
+        for (const kind of bossKinds) { const option = document.createElement('option'); option.value = kind; option.textContent = BOSS_INFO[kind].name; kindSelect.appendChild(option); }
+        card.querySelector('[data-add-boss]').addEventListener('click', () => {
+          const kind = kindSelect.value, count = clamp(Math.floor(Number(card.querySelector('[data-team-count]').value) || 1), 1, 50);
+          if (!bossKinds.includes(kind)) return;
+          team.roster.push({ kind, count }); saveTeamSetup(); renderTeamEditor();
+        });
+        teamList.appendChild(card);
+      }
+      renderPlayerSides();
+    }
+    renderTeamEditor();
+    playerSideSelect.addEventListener('change', () => { teamSetup.playerTeam = playerSideSelect.value; arenaSettings.playerTeam = teamSetup.playerTeam; saveTeamSetup(); });
+    for (const input of root.querySelectorAll('[data-team-setting]')) {
+      const key = input.dataset.teamSetting, output = root.querySelector('[data-team-output="' + key + '"]');
+      input.value = teamSetup[key]; output.textContent = teamSetup[key] + '%';
+      input.addEventListener('input', () => { teamSetup[key] = Number(input.value); arenaSettings[key] = teamSetup[key]; output.textContent = teamSetup[key] + '%'; saveTeamSetup(); });
+    }
+    const friendlyInput = root.querySelector('[data-team-friendly]'); friendlyInput.checked = teamSetup.friendlyFire;
+    friendlyInput.addEventListener('change', () => { teamSetup.friendlyFire = friendlyInput.checked; arenaSettings.friendlyFire = teamSetup.friendlyFire; saveTeamSetup(); });
+    root.querySelector('[data-team-action="add"]').addEventListener('click', () => {
+      if (teamSetup.teams.length >= 8) { bossStatus.className = 'cs-status err'; bossStatus.textContent = 'Eight teams maximum.'; return; }
+      let n = 1; while (teamSetup.teams.some(t => t.id === 'team' + n)) n++;
+      teamSetup.teams.push({ id: 'team' + n, name: 'Team ' + n, color: teamPalette[teamSetup.teams.length], roster: [] }); saveTeamSetup(); renderTeamEditor();
+    });
+    root.querySelector('[data-team-action="reset"]').addEventListener('click', () => { teamSetup = defaultTeams(); arenaSettings.playerTeam = teamSetup.playerTeam; saveTeamSetup(); renderTeamEditor(); for (const input of root.querySelectorAll('[data-team-setting]')) { input.value = teamSetup[input.dataset.teamSetting]; input.dispatchEvent(new Event('input')); } friendlyInput.checked = false; arenaSettings.friendlyFire = false; bossStatus.className = 'cs-status ok'; bossStatus.textContent = 'Team setup reset.'; });
     root.querySelectorAll('[data-boss-action]').forEach(button => button.addEventListener('click', () => {
-      const status = root.querySelector('[data-boss-status]');
       try {
-        if (button.dataset.bossAction === 'spawn') spawnStudioBoss(firstBossSelect.value, bossCountInput.value, bossModeSelect.value);
-        else if (button.dataset.bossAction === 'clash') startBossClash(firstBossSelect.value, secondBossSelect.value, bossModeSelect.value);
+        if (button.dataset.bossAction === 'start') startTeamBattle(false);
+        else if (button.dataset.bossAction === 'reinforce') startTeamBattle(true);
         else if (button.dataset.bossAction === 'tournament') startBossTournament();
         else stopBossExhibition();
-        status.className = 'cs-status ok';
-        status.textContent = button.dataset.bossAction === 'stop' ? 'Arena bosses cleared.' : 'Bosses spawned. Close Studio to join the fight.';
-      } catch (error) { status.className = 'cs-status err'; status.textContent = error.message; }
+        bossStatus.className = 'cs-status ok';
+        bossStatus.textContent = button.dataset.bossAction === 'stop' ? 'Arena cleared.' : 'Battle launched. Close Studio to join in.';
+      } catch (error) { bossStatus.className = 'cs-status err'; bossStatus.textContent = error.message; }
     }));
     setInterval(() => {
       const out = root.querySelector('[data-boss-readout]');
-      const alive = studioBosses.filter(f => f.alive).length;
-      out.textContent = studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioTournament ? 'Tournament round ' + studioTournament.round + ' of 3' : studioBossMode === 'brawl' ? 'Bosses and player brawl' : 'All bosses hunt player') : 'No arena bosses spawned.';
+      const alive = studioBosses.filter(f => f.alive && f.hp > 0).length;
+      out.textContent = studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioTournament ? 'Tournament round ' + studioTournament.round + ' of ' + studioTournament.totalRounds : studioBattleWinner ? studioBattleWinner.name + ' wins' : studioActiveTeams.length + ' teams fighting') : 'No arena battle running.';
     }, 300);
 
     root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); const action = button.dataset.action; if (action === 'restore' && P) { P.hp = D.maxHp; P.fp = D.maxFp; P.st = D.maxSt; refillFlasks(); toast('Fully restored'); } if (action === 'clear') { stopBossExhibition(); enemies.length = 0; hazards = []; projectiles = projectiles.filter(p => p.owner === 'player'); toast('Room cleared'); } if (action === 'respawn') respawnCurrentRoom(); if (action === 'bosses') { defeatAllBosses(true); saveGame(); } if (action === 'restoreBosses') restoreAllBosses(true); if (action === 'reveal') revealWorld(); if (action === 'currency') { SAVE.cinders = 999999999; SAVE.inv.emberstone = 9999; SAVE.shards = 9999; toast('Economy maximized'); } if (action === 'grant') grantEverything(true); if (action === 'ownership') unlockOwnershipSafely(true); if (action === 'repairAttack') unlockOwnershipSafely(true); if (action === 'fireworks') fireworks(); if (action === 'save') { saveGame(); toast('Changes saved'); } if (action === 'shrine' && P) { stopBossExhibition(); respawnAtShrine(SAVE.shrine || (SAVE.shrines[0] || 'R1')); toast('Returned to shrine'); } if (action === 'focusGame') toggleUI(false); if (action === 'resetLoadout') resetLoadout(true); if (action === 'restoreWeapons') restoreWeaponValues(true); if (action === 'normalPlay') restoreNormalGameplay(true); if (action === 'enableRuntime') enableStudioRuntime(); if (action === 'cleanReplay') startCleanReplay(); }));
