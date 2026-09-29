@@ -341,7 +341,7 @@
   function makeStudioBoss(kind, x, y, team) {
     const factory = BOSS_SPAWN[kind] || fallbackBossFactories[kind];
     const fighter = factory && factory(x, y, { kind });
-    if (!fighter || typeof fighter.draw !== 'function' || typeof fighter.hit !== 'function') throw new Error(BOSS_INFO[kind].name + ' cannot be spawned in this game build.');
+    if (!fighter || typeof fighter.draw !== 'function') throw new Error(BOSS_INFO[kind].name + ' cannot be spawned in this game build.');
     fighter.__studioBaseHp = Math.max(1, Number(fighter.maxHp || BOSS_INFO[kind].hp || 1000));
     fighter.maxHp = fighter.hp = fighter.displayHp = Math.round(fighter.__studioBaseHp * arenaSettings.hpPct / 100);
     fighter.active = true; fighter.introT = 0; fighter.cool = 0.4; fighter.state = 'idle';
