@@ -338,6 +338,46 @@
   const saveTeamSetup = () => { try { localStorage.setItem(teamStoreKey, JSON.stringify(teamSetup)); } catch (_) {} };
   let studioBossRoom = null, studioBossSerial = 0, studioTournament = null, studioActiveTeams = [], studioBattleWinner = null, studioArenaPaused = false;
   let arenaSettings = { ...teamSetup };
+  function revealStudioBoss(fighter) {
+    // Several story bosses begin concealed until a cutscene sets these flags.
+    for (const actor of [fighter, ...(Array.isArray(fighter.parts) ? fighter.parts : [])]) {
+      if ('hidden' in actor) actor.hidden = false;
+      if ('visible' in actor) actor.visible = true;
+      if ('shown' in actor) actor.shown = true;
+      if ('offmap' in actor) actor.offmap = false;
+      if ('alpha' in actor) actor.alpha = 1;
+      if (actor.state === 'dormant') actor.state = 'idle';
+    }
+    if (fighter.kind === 'saint0') { fighter.descend = 0; fighter.ringK = fighter.wing = fighter.halo = 1; }
+  }
+  function studioAttackTags(actor) {
+    const sheets = [actor.anim && actor.anim.s, actor.anim && actor.anim.sheet, actor.sh];
+    const names = new Set();
+    for (const sh of sheets) if (sh && sh.ok && sh.tags) for (const tag of Object.keys(sh.tags)) names.add(tag);
+    if (actor.anim && actor.anim.ts && actor.anim.ts.map) for (const tag of Object.keys(actor.anim.ts.map)) names.add(tag);
+    const isAttack = /attack|bite|slash|sweep|combo|thrust|strike|lunge|leap|smash|slam|spin|whirl|stab|claw|reap|flurry|cross|pounce|charge|burst|cast|fire|beam|bolt|spell|roar|nova|plunge|kick|uppercut|impale|grab|dash|rend|cleave|flame|frost|star|sun|moon|breath|volley/i;
+    return [...names].filter(tag => isAttack.test(tag) && !/death|dead|stagger|hurt|intro|recover|phase|transition|end|exit/i.test(tag));
+  }
+  function playStudioAttack(fighter) {
+    let played = false;
+    const actors = Array.isArray(fighter.parts) && fighter.parts.some(part => part.anim) ? fighter.parts.filter(part => part.anim && part.alive !== false) : [fighter];
+    for (const actor of actors) {
+      const tags = studioAttackTags(actor);
+      if (!tags.length || !actor.anim || typeof actor.anim.set !== 'function') continue;
+      const tag = tags[Math.floor(Math.random() * tags.length)];
+      try { actor.anim.set(tag, false, 1.15); actor.__studioAttackPlaying = true; played = true; } catch (_) {}
+    }
+    return played;
+  }
+  function updateStudioAnimation(actor, dt) {
+    if (!actor.anim || typeof actor.anim.update !== 'function') return;
+    actor.anim.update(dt);
+    if (actor.__studioAttackPlaying && actor.anim.done) {
+      actor.__studioAttackPlaying = false;
+      const sh = actor.anim.s || actor.anim.sheet || actor.sh;
+      if (sh && sh.has && sh.has('idle') && typeof actor.anim.set === 'function') actor.anim.set('idle', true, 1);
+    }
+  }
   function makeStudioBoss(kind, x, y, team) {
     const factory = BOSS_SPAWN[kind] || fallbackBossFactories[kind];
     const fighter = factory && factory(x, y, { kind });
@@ -347,6 +387,7 @@
     fighter.active = true; fighter.introT = 0; fighter.cool = 0.4; fighter.state = 'idle';
     if (!fighter.anim) fighter.anim = { done: true, update() {}, set() {} };
     if (fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
+    revealStudioBoss(fighter);
     fighter.rewards = () => {};
     fighter.__studioExhibition = true; fighter.__studioSerial = ++studioBossSerial;
     fighter.__studioTeam = team.id; fighter.__studioTeamName = team.name; fighter.__studioTeamColor = team.color;
@@ -380,6 +421,7 @@
     if (!fighter || typeof fighter.update !== 'function') throw new Error('This boss has no native AI in this build.');
     fighter.active = true; fighter.introT = 0; fighter.state = 'idle'; fighter.__studioExhibition = true;
     if (fighter.anim && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
+    revealStudioBoss(fighter);
     fighter.die = function () { this.hp = 0; this.state = 'dead'; this.active = false; if (this.parts) for (const part of this.parts) part.state = 'dead'; };
     boss = fighter;
     toast('Native AI: ' + (BOSS_INFO[kind]?.name || kind), 3);
@@ -481,8 +523,8 @@
     dt = (Number(dt) || 1 / 60) * modState.bossFightSpeed / 100;
     const living = studioBosses.filter(f => f.alive && f.hp > 0);
     for (const fighter of studioBosses) {
-      fighter.anim.update(dt);
-      if (fighter.kind === 'twins' && fighter.parts) for (const part of fighter.parts) if (part.anim) part.anim.update(dt);
+      updateStudioAnimation(fighter, dt);
+      if (Array.isArray(fighter.parts)) for (const part of fighter.parts) updateStudioAnimation(part, dt);
       fighter.flash = Math.max(0, (fighter.flash || 0) - dt * 4);
       fighter.displayHp += (fighter.hp - fighter.displayHp) * Math.min(1, dt * 5);
       if (!fighter.alive) continue;
@@ -508,22 +550,29 @@
       }
       fighter.__studioSwing = Math.max(0, fighter.__studioSwing - dt);
       fighter.__studioNextHit -= dt;
-      if (fighter.__studioNextHit <= 0 && distance < 115) {
+      const wasWinding = fighter.__studioWindup > 0;
+      if (wasWinding) fighter.__studioWindup -= dt;
+      if (!fighter.__studioWindup && fighter.__studioNextHit <= 0 && distance < 115) {
         fighter.__studioNextHit = 0.8 + Math.random() * 0.6;
-        fighter.__studioSwing = 0.35;
-        const tags = ['attack','bite','sweep','combo','thrust','slash','strike'];
-        const tag = fighter.sh && tags.find(t => fighter.sh.has(t));
-        if (tag) fighter.anim.set(tag, false, 1.25);
-        const damage = Math.max(14, Math.round(fighter.__studioBaseHp * (0.035 + Math.random() * 0.02) * arenaSettings.damagePct / 100));
-        if (target === P) {
-          hurtPlayer(Math.min(90, damage * 0.4), fighter.face, ++hazardId, { src: fighter, parryable: true });
-        } else if (target.alive) {
-          target.hit({ dmg: damage, x: target.x, y: target.y - 35, dir: fighter.face, poise: 0 });
-          spawnFx('hit', target.x, target.y - 35, fighter.face);
-        }
-        shake = Math.max(shake, 2);
+        fighter.__studioSwing = 0.55;
+        fighter.__studioWindup = 0.23;
+        fighter.__studioPendingTarget = target;
+        playStudioAttack(fighter);
       }
-      if (fighter.__studioSwing <= 0 && fighter.anim.done && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
+      if (wasWinding && fighter.__studioWindup <= 0) {
+        fighter.__studioWindup = 0;
+        const victim = fighter.__studioPendingTarget;
+        fighter.__studioPendingTarget = null;
+        if (!victim || (victim !== P && !victim.alive) || Math.abs(victim.x - fighter.x) > 130) continue;
+        const damage = Math.max(14, Math.round(fighter.__studioBaseHp * (0.035 + Math.random() * 0.02) * arenaSettings.damagePct / 100));
+        if (victim === P) {
+          hurtPlayer(Math.min(90, damage * 0.4), fighter.face, ++hazardId, { src: fighter, parryable: true });
+        } else if (victim.alive) {
+          victim.hit({ dmg: damage, x: victim.x, y: victim.y - 35, dir: fighter.face, poise: 0 });
+          spawnFx('hit', victim.x, victim.y - 35, fighter.face);
+        }
+        shake = Math.max(shake, 3.5);
+      }
     }
     if (!studioBattleWinner && !studioTournament && studioActiveTeams.length > 1) {
       const aliveTeams = new Set(studioBosses.filter(f => f.alive && f.hp > 0).map(f => f.__studioTeam));
@@ -535,7 +584,29 @@
   }
   HOOKS.update.push(updateBossClash);
   HOOKS.update.push(updateBossTournament);
-  HOOKS.render.push(() => { if (studioBossRoom === (room && room.id)) for (const fighter of studioBosses) fighter.draw(); });
+  HOOKS.render.push(() => {
+    if (studioBossRoom !== (room && room.id)) return;
+    for (const fighter of studioBosses) {
+      const sheets = [fighter.anim && fighter.anim.sheet, fighter.anim && fighter.anim.s, fighter.sh,
+        ...(Array.isArray(fighter.parts) ? fighter.parts.flatMap(part => [part.anim && part.anim.sheet, part.anim && part.anim.s, part.sh]) : [])];
+      let spriteReady = false;
+      for (const sh of sheets) if (sh && sh.ok) { const img = sh.img; if (img && img.complete && img.naturalWidth) { spriteReady = true; break; } }
+      try { fighter.draw(); }
+      catch (error) { if (!fighter.__studioDrawError) console.warn('[Cinderhollow Studio] Boss art failed:', fighter.kind, error); fighter.__studioDrawError = true; }
+      if (!spriteReady || fighter.__studioDrawError) {
+        g.save(); g.fillStyle = fighter.__studioTeamColor || '#c78263';
+        g.globalAlpha = 0.75; g.fillRect(Math.round(fighter.x - 17), Math.round(fighter.y - 66), 34, 66);
+        g.fillStyle = '#161a20'; g.fillRect(Math.round(fighter.x - 11), Math.round(fighter.y - 58), 22, 8);
+        g.restore();
+      }
+      if (fighter.alive && fighter.__studioWindup > 0) {
+        g.save(); g.globalAlpha = 0.35 + 0.3 * Math.sin(time * 35);
+        g.strokeStyle = fighter.__studioTeamColor || '#f1b16c'; g.lineWidth = 2;
+        g.beginPath(); g.ellipse(Math.round(fighter.x), Math.round(fighter.floor || fighter.y) - 2, 30, 5, 0, 0, Math.PI * 2); g.stroke();
+        g.restore();
+      }
+    }
+  });
   const nativeUpdateCamera = updateCamera;
   updateCamera = function studioUpdateCamera(dt, snap) {
     nativeUpdateCamera(dt, snap);
