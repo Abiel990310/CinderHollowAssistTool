@@ -71,6 +71,8 @@
     randomArsenal: false,
     storm: true,
     noclipSpeed: 360,
+    bossFightSpeed: 100,
+    bossCamera: 'player',
     fov: 100,
     weaponPower: 9999,
     theme: 'ember',
@@ -80,6 +82,8 @@
   };
   try { Object.assign(modState, JSON.parse(localStorage.getItem('cinderhollow_op_ui') || '{}')); } catch (_) {}
   modState.fov = Math.max(100, Math.min(500, Number(modState.fov) || 100));
+  modState.bossFightSpeed = Math.max(25, Math.min(300, Number(modState.bossFightSpeed) || 100));
+  modState.bossCamera = ['player','arena'].includes(modState.bossCamera) ? modState.bossCamera : 'player';
   window.__CINDERHOLLOW_FOV__ = modState.fov;
   const nativeLxBegin = lxBegin;
   lxBegin = function studioLightingStart() {
@@ -130,8 +134,8 @@
   }
   const saveModState = () => {
     try {
-      const { masterEnabled, autoGrant, freeze, oneHit, infJump, shield, vacuum, killAura, randomArsenal, storm, noclipSpeed, fov, weaponPower, theme, uiOpen } = modState;
-      localStorage.setItem('cinderhollow_op_ui', JSON.stringify({ masterEnabled, autoGrant, freeze, oneHit, infJump, shield, vacuum, killAura, randomArsenal, storm, noclipSpeed, fov, weaponPower, theme, uiOpen }));
+      const { masterEnabled, autoGrant, freeze, oneHit, infJump, shield, vacuum, killAura, randomArsenal, storm, noclipSpeed, bossFightSpeed, bossCamera, fov, weaponPower, theme, uiOpen } = modState;
+      localStorage.setItem('cinderhollow_op_ui', JSON.stringify({ masterEnabled, autoGrant, freeze, oneHit, infJump, shield, vacuum, killAura, randomArsenal, storm, noclipSpeed, bossFightSpeed, bossCamera, fov, weaponPower, theme, uiOpen }));
     } catch (_) {}
   };
 
@@ -302,6 +306,7 @@
   let studioBossRoom = null;
   let studioBossMode = 'brawl';
   let studioBossSerial = 0;
+  let studioTournament = null;
   function makeStudioBoss(kind, x, y) {
     const fallback = { hound: () => new Hound(x, y), omen: () => new Omen(x, y) };
     const factory = BOSS_SPAWN[kind];
@@ -328,10 +333,12 @@
   function stopBossExhibition() {
     studioBosses.length = 0;
     studioBossRoom = null;
+    studioTournament = null;
   }
   function spawnStudioBoss(kind, count = 1, mode = studioBossMode) {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
     if (!exhibitionKinds.includes(kind)) throw new Error('Choose a supported boss.');
+    studioTournament = null;
     count = Math.floor(Number(count));
     if (!Number.isFinite(count) || count < 1 || count > 50) throw new Error('Spawn 1–50 per click. You can click again to add more.');
     if (studioBossRoom && studioBossRoom !== room.id) stopBossExhibition();
@@ -354,6 +361,47 @@
     spawnStudioBoss(firstKind, 1, mode);
     spawnStudioBoss(secondKind, 1, mode);
   }
+  function startBossTournament() {
+    if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
+    const queue = exhibitionKinds.slice();
+    for (let i = queue.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [queue[i], queue[j]] = [queue[j], queue[i]]; }
+    const bracket = { queue, winners: [], round: 1, pair: 0, nextAt: 0, champion: null };
+    const first = bracket.queue.shift(), second = bracket.queue.shift();
+    startBossClash(first, second, 'brawl');
+    bracket.pair = 1;
+    studioTournament = bracket;
+    toast('Boss Tournament · round 1 of 3', 4);
+  }
+  function updateBossTournament() {
+    const bracket = studioTournament;
+    if (!bracket || studioBosses.length !== 2) return;
+    if (studioBosses.every(f => f.alive)) return;
+    if (!bracket.nextAt) {
+      const winner = studioBosses.find(f => f.alive) || studioBosses[0];
+      bracket.winners.push(winner.kind);
+      bracket.nextAt = time + 2;
+      toast(winner.name + ' advances', 2);
+      return;
+    }
+    if (time < bracket.nextAt) return;
+    if (!bracket.queue.length) {
+      if (bracket.winners.length === 1) {
+        bracket.champion = bracket.winners[0];
+        toast('Tournament champion: ' + BOSS_INFO[bracket.champion].name, 6);
+        studioTournament = null;
+        return;
+      }
+      bracket.queue = bracket.winners.splice(0);
+      bracket.round++;
+      bracket.pair = 0;
+    }
+    const first = bracket.queue.shift(), second = bracket.queue.shift();
+    startBossClash(first, second, 'brawl');
+    bracket.pair++;
+    bracket.nextAt = 0;
+    studioTournament = bracket;
+    toast('Tournament round ' + bracket.round + ' · match ' + bracket.pair, 3);
+  }
   const nativeTargets = targets;
   targets = function studioTargets() {
     const list = nativeTargets();
@@ -363,7 +411,7 @@
   function updateBossClash(dt) {
     if (!studioBosses.length) return;
     if (state !== 'play' || !room || room.id !== studioBossRoom) { stopBossExhibition(); return; }
-    dt = Number(dt) || 1 / 60;
+    dt = (Number(dt) || 1 / 60) * modState.bossFightSpeed / 100;
     const living = studioBosses.filter(f => f.alive);
     for (const fighter of studioBosses) {
       fighter.anim.update(dt);
@@ -403,7 +451,19 @@
     }
   }
   HOOKS.update.push(updateBossClash);
+  HOOKS.update.push(updateBossTournament);
   HOOKS.render.push(() => { if (studioBossRoom === (room && room.id)) for (const fighter of studioBosses) fighter.draw(); });
+  const nativeUpdateCamera = updateCamera;
+  updateCamera = function studioUpdateCamera(dt, snap) {
+    nativeUpdateCamera(dt, snap);
+    if (modState.bossCamera !== 'arena' || !studioBosses.length || !room || room.id !== studioBossRoom) return;
+    const living = studioBosses.filter(f => f.alive);
+    if (!living.length) return;
+    const focus = living.reduce((sum, fighter) => sum + fighter.x, 0) / living.length;
+    const maxX = room.pw - W;
+    const tx = maxX < 0 ? maxX / 2 : clamp(focus - W / 2, 0, maxX);
+    cam.x += (tx - cam.x) * Math.min(1, dt * 5);
+  };
   const nativeRenderHUD = renderHUD;
   renderHUD = function studioRenderHUD() {
     if (!studioBosses.length) return nativeRenderHUD();
@@ -842,7 +902,7 @@
       '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting. Zoom out as far as 5×.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="500" step="10" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
       '<section class="cs-page" data-page="inventory"><div class="cs-pagehead"><div><h2>Inventory & Progression</h2><p>Currency, flasks, materials, skills, spells, and equipment ownership.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Economy</h3><div class="cs-fields">' + field('cinders','Cinders',SAVE.cinders) + field('shards','Skill shards',SAVE.shards) + field('emberstone','Emberstone',SAVE.inv.emberstone || 0) + '</div></div><div class="cs-card"><h3>Flasks</h3><div class="cs-fields">' + field('flaskBase','Total charges',SAVE.flaskBase) + field('flaskBlue','Azure allocation',SAVE.flaskBlue) + field('flaskPot','Flask potency',SAVE.flaskPot) + '</div></div><div class="cs-card wide"><h3>Ownership</h3><div class="cs-actions"><button class="cs-btn" data-action="ownership">Safely unlock all gear, skills and charms</button><button class="cs-btn" data-action="currency">Max currencies and materials</button><button class="cs-btn" data-action="save">Commit inventory to save</button><button class="cs-btn" data-action="fireworks">Preview reward effect</button></div><p class="cs-help" style="margin-top:10px">Preserves the equipped loadout and follows the game’s mutually exclusive skill-tree rules.</p></div></div></section>',
       '<section class="cs-page" data-page="combat"><div class="cs-pagehead"><div><h2>Combat Systems</h2><p>Damage, AI control, defensive automation, and arsenal behavior.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Damage model</h3><div class="cs-field"><label>Global weapon base power</label><input class="cs-range" type="range" min="1" max="100000" step="100" data-range="weaponPower"><output data-output="weaponPower"></output></div>' + toggle('oneHit','One-hit hostiles','Set enemies and bosses to one HP') + toggle('killAura','Kill aura','Defeat nearby targets automatically') + '</div><div class="cs-card"><h3>AI & projectiles</h3>' + toggle('freeze','Freeze all AI','Stops enemies and active bosses') + toggle('vacuum','Enemy vacuum','Pull enemies toward the player') + toggle('shield','Projectile shield','Remove enemy shots and hazards') + '</div><div class="cs-card wide"><h3>Arsenal automation</h3>' + toggle('randomArsenal','Random arsenal','Cycle random weapons and arts') + toggle('storm','Cinder aura','Persistent ambient particle field') + '<div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-action="fireworks">Cinderfall effect</button><button class="cs-btn" data-action="clear">Clear active combat</button></div></div></div></section>',
-      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Boss Arena</h3><p class="cs-help">Add as many arena bosses as you like. You can hit every one of them. In Brawl, they attack each other and you; in Hunt, they all chase you. Their attack loop is simplified to keep multiple bosses stable, and arena defeats do not change story progress. Turn off God mode if you want their hits to hurt you.</p><div class="cs-fields"><div class="cs-field"><label>Boss to add</label><select class="cs-select" data-boss-first></select></div><div class="cs-field"><label>Count per click</label><input class="cs-input" type="number" min="1" max="50" step="1" value="1" data-boss-count></div><div class="cs-field"><label>Fight mode</label><select class="cs-select" data-boss-mode><option value="brawl">Brawl · bosses and player</option><option value="hunt">Hunt · all versus player</option></select></div><div class="cs-field"><label>Second boss for quick clash</label><select class="cs-select" data-boss-second></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="spawn">Add selected bosses</button><button class="cs-btn" data-boss-action="clash">Start two-boss clash</button><button class="cs-btn wide" data-boss-action="stop">Clear arena bosses</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena bosses spawned.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
+      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Boss Arena</h3><p class="cs-help">Add as many arena bosses as you like. You can hit every one of them. In Brawl, they attack each other and you; in Hunt, they all chase you. Their attack loop is simplified to keep multiple bosses stable, and arena defeats do not change story progress. Turn off God mode if you want their hits to hurt you.</p><div class="cs-fields"><div class="cs-field"><label>Boss to add</label><select class="cs-select" data-boss-first></select></div><div class="cs-field"><label>Count per click</label><input class="cs-input" type="number" min="1" max="50" step="1" value="1" data-boss-count></div><div class="cs-field"><label>Fight mode</label><select class="cs-select" data-boss-mode><option value="brawl">Brawl · bosses and player</option><option value="hunt">Hunt · all versus player</option></select></div><div class="cs-field"><label>Second boss for quick clash</label><select class="cs-select" data-boss-second></select></div></div><div class="cs-fields" style="margin-top:12px"><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow boss fight</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="spawn">Add selected bosses</button><button class="cs-btn" data-boss-action="clash">Start two-boss clash</button><button class="cs-btn" data-boss-action="tournament">Start 8-boss tournament</button><button class="cs-btn" data-boss-action="stop">Clear arena bosses</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena bosses spawned.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
       '<section class="cs-page" data-page="gear"><div class="cs-pagehead"><div><h2>Professional Weapon Lab</h2><p>Author melee weapons, firearms, shotguns, launchers, and arcane guns with native combat integration.</p></div><span class="cs-badge">Persistent runtime weapons</span></div><form id="cs-weapon-form"><div class="cs-grid"><div class="cs-card wide"><h3>Identity & architecture</h3><div class="cs-fields four"><div class="cs-field"><label>Internal ID</label><input class="cs-input" name="id" value="studio_ember_rifle"></div><div class="cs-field"><label>Display name</label><input class="cs-input" name="name" value="Emberline Rifle"></div><div class="cs-field"><label>Weapon architecture</label><select class="cs-select" name="mode"><option value="melee">Melee only</option><option value="handgun">Handgun</option><option value="rifle" selected>Automatic rifle</option><option value="shotgun">Shotgun</option><option value="launcher">Launcher</option><option value="arcane">Arcane focus</option></select></div><div class="cs-field"><label>Base animation template</label><select class="cs-select" name="template" data-weapon-template></select></div><div class="cs-field"><label>Weapon art</label><select class="cs-select" name="art" data-art-template></select></div><div class="cs-field full"><label>Description</label><input class="cs-input" name="desc" value="A precision firearm authored in Cinderhollow Studio."></div></div></div>',
       '<div class="cs-card"><h3>Melee chassis</h3><div class="cs-fields">' + field('base','Base damage',120) + field('speed','Attack animation speed',1.8) + field('reach','Melee reach',1) + field('stam','Stamina cost',0.2) + field('poise','Melee poise',2) + '</div></div><div class="cs-card"><h3>Elemental melee profile</h3><div class="cs-fields">' + field('fire','Fire multiplier',0) + field('holy','Holy multiplier',0) + field('frost','Frost buildup',0) + field('bleed','Bleed buildup',0) + '</div></div>',
       '<div class="cs-card wide"><h3>Fire control & aiming</h3><div class="cs-fields four"><div class="cs-field"><label>Aim system</label><select class="cs-select" name="aimMode"><option value="directional">Keyboard directional</option><option value="cursor">Mouse cursor</option><option value="nearest">Auto-aim nearest</option><option value="facing">Facing direction</option></select></div><div class="cs-field"><label>Fire trigger</label><select class="cs-select" name="fireTrigger"><option value="light">Basic attack</option><option value="heavy">Heavy attack</option><option value="both">Both attacks</option></select></div><div class="cs-field"><label>Projectile visual</label><select class="cs-select" name="projectileVisual"><option value="ashbolt">Ember round</option><option value="sunspear">Sun spear</option><option value="shard">Arcane shard</option><option value="lance">Blue lance</option><option value="crescent">Blade wave</option><option value="arrow">Physical round</option></select></div><label class="cs-toggle"><div><strong>Full automatic</strong><small>Hold basic attack to keep firing</small></div><input type="checkbox" name="fullAuto" checked></label></div><div class="cs-fields four" style="margin-top:12px">' + field('fireRate','Rounds per second',8) + field('magSize','Magazine size',30) + field('reloadTime','Reload time (seconds)',1.2) + field('shotDamage','Shot damage multiplier',1.4) + field('critChance','Critical chance %',10) + field('critMultiplier','Critical multiplier',2) + field('recoil','Recoil force',25) + field('screenShake','Screen shake',2) + '</div></div>',
@@ -893,7 +953,7 @@
     root.querySelectorAll('.cs-nav').forEach(button => button.addEventListener('click', () => { root.querySelectorAll('.cs-nav').forEach(x => x.classList.toggle('active', x === button)); root.querySelectorAll('.cs-page').forEach(x => x.classList.toggle('active', x.dataset.page === button.dataset.page)); }));
 
     root.querySelectorAll('[data-toggle]').forEach(input => { const key = input.dataset.toggle; input.checked = key in SETTINGS ? !!SETTINGS[key] : !!modState[key]; input.addEventListener('change', () => { if (key in SETTINGS) { SETTINGS[key] = input.checked ? 1 : 0; saveSettings(); } else { modState[key] = input.checked; saveModState(); } }); });
-    root.querySelectorAll('[data-range]').forEach(input => { const key = input.dataset.range; input.value = modState[key]; const out = root.querySelector('[data-output="' + key + '"]'); const apply = () => { modState[key] = Number(input.value); if (out) out.textContent = Number(input.value).toLocaleString() + (key === 'fov' ? '%' : ''); if (key === 'fov') window.__CINDERHOLLOW_FOV__ = modState.fov; if (key === 'weaponPower' && modState.masterEnabled) setWeaponPower(input.value); else saveModState(); }; input.addEventListener('input', apply); apply(); });
+    root.querySelectorAll('[data-range]').forEach(input => { const key = input.dataset.range; input.value = modState[key]; const out = root.querySelector('[data-output="' + key + '"]'); const apply = () => { modState[key] = Number(input.value); if (out) out.textContent = Number(input.value).toLocaleString() + (key === 'fov' || key === 'bossFightSpeed' ? '%' : ''); if (key === 'fov') window.__CINDERHOLLOW_FOV__ = modState.fov; if (key === 'weaponPower' && modState.masterEnabled) setWeaponPower(input.value); else saveModState(); }; input.addEventListener('input', apply); apply(); });
     root.querySelectorAll('[data-stat-fields] input').forEach(input => input.addEventListener('change', () => { SAVE.stats[input.name] = Number(input.value) || 0; refreshDerived(false); saveGame(); }));
     root.querySelectorAll('[data-page="player"] input[name=hp],[data-page="player"] input[name=fp],[data-page="player"] input[name=st]').forEach(input => input.addEventListener('change', () => { if (P) P[input.name] = Number(input.value) || 0; }));
     root.querySelectorAll('[data-page="inventory"] input').forEach(input => input.addEventListener('change', () => { const value = Number(input.value) || 0; if (input.name === 'emberstone') SAVE.inv.emberstone = value; else SAVE[input.name] = value; saveGame(); }));
@@ -902,6 +962,9 @@
     const secondBossSelect = root.querySelector('[data-boss-second]');
     const bossCountInput = root.querySelector('[data-boss-count]');
     const bossModeSelect = root.querySelector('[data-boss-mode]');
+    const bossCameraSelect = root.querySelector('[data-boss-camera]');
+    bossCameraSelect.value = modState.bossCamera;
+    bossCameraSelect.addEventListener('change', () => { modState.bossCamera = bossCameraSelect.value; saveModState(); });
     for (const kind of exhibitionKinds) {
       if (!BOSS_INFO[kind]) continue;
       for (const select of [firstBossSelect, secondBossSelect]) {
@@ -914,6 +977,7 @@
       try {
         if (button.dataset.bossAction === 'spawn') spawnStudioBoss(firstBossSelect.value, bossCountInput.value, bossModeSelect.value);
         else if (button.dataset.bossAction === 'clash') startBossClash(firstBossSelect.value, secondBossSelect.value, bossModeSelect.value);
+        else if (button.dataset.bossAction === 'tournament') startBossTournament();
         else stopBossExhibition();
         status.className = 'cs-status ok';
         status.textContent = button.dataset.bossAction === 'stop' ? 'Arena bosses cleared.' : 'Bosses spawned. Close Studio to join the fight.';
@@ -922,7 +986,7 @@
     setInterval(() => {
       const out = root.querySelector('[data-boss-readout]');
       const alive = studioBosses.filter(f => f.alive).length;
-      out.textContent = studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioBossMode === 'brawl' ? 'Bosses and player brawl' : 'All bosses hunt player') : 'No arena bosses spawned.';
+      out.textContent = studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioTournament ? 'Tournament round ' + studioTournament.round + ' of 3' : studioBossMode === 'brawl' ? 'Bosses and player brawl' : 'All bosses hunt player') : 'No arena bosses spawned.';
     }, 300);
 
     root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); const action = button.dataset.action; if (action === 'restore' && P) { P.hp = D.maxHp; P.fp = D.maxFp; P.st = D.maxSt; refillFlasks(); toast('Fully restored'); } if (action === 'clear') { stopBossExhibition(); enemies.length = 0; hazards = []; projectiles = projectiles.filter(p => p.owner === 'player'); toast('Room cleared'); } if (action === 'respawn') respawnCurrentRoom(); if (action === 'bosses') { defeatAllBosses(true); saveGame(); } if (action === 'restoreBosses') restoreAllBosses(true); if (action === 'reveal') revealWorld(); if (action === 'currency') { SAVE.cinders = 999999999; SAVE.inv.emberstone = 9999; SAVE.shards = 9999; toast('Economy maximized'); } if (action === 'grant') grantEverything(true); if (action === 'ownership') unlockOwnershipSafely(true); if (action === 'repairAttack') unlockOwnershipSafely(true); if (action === 'fireworks') fireworks(); if (action === 'save') { saveGame(); toast('Changes saved'); } if (action === 'shrine' && P) { stopBossExhibition(); respawnAtShrine(SAVE.shrine || (SAVE.shrines[0] || 'R1')); toast('Returned to shrine'); } if (action === 'focusGame') toggleUI(false); if (action === 'resetLoadout') resetLoadout(true); if (action === 'restoreWeapons') restoreWeaponValues(true); if (action === 'normalPlay') restoreNormalGameplay(true); if (action === 'enableRuntime') enableStudioRuntime(); if (action === 'cleanReplay') startCleanReplay(); }));
