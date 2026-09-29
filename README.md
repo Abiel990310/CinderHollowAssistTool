@@ -14,14 +14,15 @@ The loader runs only on the Cinderhollow page or a local test host. It modifies 
 
 Custom weapon designs, Studio controls (including FOV), and Value Lab catalog edits are stored in this browser's local storage. Equipped weapons and progression use Cinderhollow's normal game save. Live player values such as current HP are temporary unless the game itself saves them. Clearing browser site data removes these stored values.
 
-## Boss Battle Forge
+## Boss controls
 
-Open F2 → World & Bosses → Boss Battle Forge. The boss picker is generated from the game's current boss registrations, including its later regions and secret bosses.
+Open F2 → World & Bosses. The picker lists the boss types available in the current game build, including later regions and secret bosses.
 
-- Add up to eight teams, give each a name and color, and build each roster from multiple boss types. Set 1–50 copies per roster row; add more rows for larger squads.
-- Choose a player side: Neutral, Spectator, or one of your teams. Neutral can be attacked by all teams. Spectator is ignored by arena bosses. Friendly fire controls whether your attacks can hit allies.
-- Adjust player target chance, boss health, boss damage, fight speed, and camera tracking. Health changes apply to newly spawned bosses; damage, allegiance, and friendly fire can be changed while fighting.
-- Start a fresh team battle or send your saved roster as reinforcements. A one-team roster with Neutral player side is a survival fight. The random boss tournament remains available.
-- Each living boss gets a separate health bar labeled by team. Bars disappear when that boss dies. Team rosters and settings are saved locally; active arena fights are temporary.
+- **Native Boss Spawn:** Put one boss into the game's original boss slot with its native AI. Clear the spawned boss separately. Some bosses depend on their story arena. Exhibition deaths do not grant story rewards.
+- **Quick Boss Arena:** Choose a boss, 1–50 copies, and Free-for-all or Hunt player. Start a fresh fight or add another wave.
+- **One-on-One Duel:** Pick the two bosses yourself.
+- **Team Battle Forge:** Build mixed rosters with up to eight named, colored teams. Set 1–50 copies per roster row, player allegiance, player target chance, boss health and damage, fight speed, camera, and friendly fire. Start a new battle or send reinforcements. Team setup is saved locally.
+- **Random Tournament:** Choose 2, 4, 8, or 16 unique random entrants. Matches advance automatically.
+- **Active Arena:** Pause or resume arena AI, heal living fighters, or clear the arena. Every living arena fighter has a separate health bar; bars disappear when that fighter dies.
 
-Arena bosses use simplified attacks for multi-boss fights. Defeating them does not grant story rewards or mark story bosses defeated. Turn off God mode in Quick Controls if you want their hits to damage you. Arena fights clear when you leave the room or reload.
+Arena fighters use simplified attacks for multi-boss fights and give no story rewards. Turn off God mode in Quick Controls if you want their hits to damage you. Arena fights clear when you leave the room or reload.
