@@ -10,6 +10,14 @@ The snippet fetches the current `main` version of `cinderhollow-op-loader.js` wi
 
 The loader runs only on the Cinderhollow page or a local test host. It modifies the current tab and may change the browser's local Cinderhollow save.
 
+## Automatic loading in Firefox
+
+1. Install [Violentmonkey for Firefox](https://addons.mozilla.org/en-US/firefox/addon/violentmonkey/).
+2. Open the [Cinderhollow Studio auto loader userscript](https://raw.githubusercontent.com/Abiel990310/CinderHollowAssistTool/main/cinderhollow-auto.user.js) and choose **Install** in Violentmonkey. If the browser displays the script as text, use Violentmonkey → Dashboard → **Install from URL** with that same link.
+3. Visit or reload [Cinderhollow](https://p4zox.github.io/cinderhollow/). The Studio loader fetches the latest `main` version automatically on every visit. Press **F2** to open the panel.
+
+Disable the userscript in Violentmonkey to return to the unmodified game. Do not also paste the console snippet on the same visit.
+
 ## What saves
 
 Custom weapon designs, Studio controls (including FOV), and Value Lab catalog edits are stored in this browser's local storage. Equipped weapons and progression use Cinderhollow's normal game save. Live player values such as current HP are temporary unless the game itself saves them. Clearing browser site data removes these stored values.
