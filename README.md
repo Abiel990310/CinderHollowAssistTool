@@ -25,4 +25,4 @@ Open F2 → World & Bosses. The picker lists the boss types available in the cur
 - **Random Tournament:** Choose 2, 4, 8, or 16 unique random entrants. Matches advance automatically.
 - **Active Arena:** Pause or resume arena AI, heal living fighters, or clear the arena. Every living arena fighter has a separate health bar; bars disappear when that fighter dies.
 
-Arena fighters use simplified attacks for multi-boss fights and give no story rewards. Turn off God mode in Quick Controls if you want their hits to damage you. Arena fights clear when you leave the room or reload.
+Arena fighters use each boss's original sprite art and available attack animations, with scripted targeting and damage for multi-boss fights. The single native boss mode uses the game's original AI. Arena fights give no story rewards. If a sprite asset is missing, a visible stand-in appears instead. Turn off God mode in Quick Controls if you want their hits to damage you. Arena fights clear when you leave the room or reload.
