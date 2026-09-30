@@ -735,10 +735,9 @@
     }
   });
   function startNativeTeamBattle() {
-    if (TRAINING.on) throw new Error('Exit Training Grounds before a team battle.');
     if (state === 'menu') { menu = null; state = 'play'; }
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
-    if (boss && boss.alive && !boss.__studioExhibition) throw new Error('A story boss is active in this room.');
+    if (boss && boss.alive && !boss.__studioExhibition && !TRAINING.on) throw new Error('A story boss is active in this room. Leave its arena or use Training Grounds.');
     const planned = teamSetup.teams.reduce((total, team) => total + team.roster.reduce((n, row) => n + row.count, 0), 0);
     if (planned < 2 || planned > 100) throw new Error('Choose 2–100 fighters across your teams.');
     stopBossExhibition();
