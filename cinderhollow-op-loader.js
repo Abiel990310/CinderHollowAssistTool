@@ -757,7 +757,8 @@
         for (const row of team.roster) for (let n = 0; n < row.count; n++) {
           const factory = BOSS_SPAWN[row.kind] || fallbackBossFactories[row.kind];
           if (!factory) throw new Error(BOSS_INFO[row.kind].name + ' has no native factory.');
-          const x = clamp((ti + 1) / (teams.length + 1) * room.pw + (n % 8 - 3.5) * 24, TILE + 30, room.pw - TILE - 30);
+          const teamX = P.x + (ti - (teams.length - 1) / 2) * 220;
+          const x = clamp(teamX + (n % 8 - (Math.min(row.count, 8) - 1) / 2) * 24, TILE + 30, room.pw - TILE - 30);
           const spot = studioGroundPosition(x, P.y);
           const fighter = factory(spot.x, spot.y, { kind: row.kind });
           if (!fighter || typeof fighter.update !== 'function' || typeof fighter.draw !== 'function') throw new Error(BOSS_INFO[row.kind].name + ' cannot use its original AI here.');
