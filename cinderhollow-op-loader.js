@@ -364,16 +364,26 @@
     const names = new Set();
     for (const sh of sheets) if (sh && sh.ok && sh.tags) for (const tag of Object.keys(sh.tags)) names.add(tag);
     if (actor.anim && actor.anim.ts && actor.anim.ts.map) for (const tag of Object.keys(actor.anim.ts.map)) names.add(tag);
-    const isAttack = /attack|bite|slash|sweep|combo|thrust|strike|lunge|leap|smash|slam|spin|whirl|stab|claw|reap|flurry|cross|pounce|charge|burst|cast|fire|beam|bolt|spell|roar|nova|plunge|kick|uppercut|impale|grab|dash|rend|cleave|flame|frost|star|sun|moon|breath|volley/i;
+    const isAttack = /attack|bite|slash|sweep|combo|thrust|strike|lunge|leap|smash|slam|spin|whirl|stab|claw|reap|flurry|cross|pounce|charge|burst|cast|fire|beam|bolt|spell|roar|nova|plunge|kick|uppercut|impale|grab|dash|rend|cleave|flame|frost|star|sun|moon|breath|volley|guard|block|parry|counter|shield/i;
     return [...names].filter(tag => isAttack.test(tag) && !/death|dead|stagger|hurt|intro|recover|phase|transition|end|exit/i.test(tag));
   }
-  function playStudioAttack(fighter) {
+  function playStudioAttack(fighter, moveType = 'strike') {
     let played = false;
+    const preferred = {
+      strike: /attack|bite|slash|sweep|combo|thrust|strike|smash|slam|stab|claw|reap|flurry|cross|kick|rend|cleave/i,
+      charge: /lunge|leap|pounce|charge|dash|rush|plunge|thrust/i,
+      nova: /spin|whirl|sweep|burst|nova|roar|eruption|stomp|storm/i,
+      bolt: /cast|fire|beam|bolt|spell|flame|frost|star|sun|moon|breath|volley/i,
+      beam: /beam|ray|laser|sun|moon|cast|fire/i,
+      guard: /guard|block|parry|counter|shield|roar/i,
+    }[moveType];
     const actors = Array.isArray(fighter.parts) && fighter.parts.some(part => part.anim) ? fighter.parts.filter(part => part.anim && part.alive !== false) : [fighter];
     for (const actor of actors) {
       const tags = studioAttackTags(actor);
       if (!tags.length || !actor.anim || typeof actor.anim.set !== 'function') continue;
-      const tag = tags[Math.floor(Math.random() * tags.length)];
+      const matching = preferred ? tags.filter(tag => preferred.test(tag)) : [];
+      const choices = matching.length ? matching : tags;
+      const tag = choices[Math.floor(Math.random() * choices.length)];
       try { actor.anim.set(tag, false, 1.15); actor.__studioAttackPlaying = true; played = true; } catch (_) {}
     }
     return played;
@@ -414,6 +424,98 @@
     if (!best) throw new Error('No safe floor near the spawn point in this room.');
     return best;
   }
+  const studioAbilityDecks = {
+    hound: ['charge','strike','nova'], omen: ['charge','nova','bolt'], kalden: ['strike','charge','bolt'],
+    vessel: ['nova','strike','charge'], librarian: ['bolt','beam','nova'], sovereign: ['strike','nova','beam'],
+    unwritten: ['bolt','nova','beam'], ice_warden: ['bolt','nova','charge'], twins: ['strike','charge','nova'],
+    bellringer: ['nova','beam','strike'], cindervane: ['bolt','charge','nova'], overseer: ['guard','strike','beam'],
+    colossus: ['nova','charge','strike'], oswin: ['strike','charge','bolt'], champion: ['strike','charge','nova'],
+    sentinels: ['guard','charge','strike'], first_ember: ['strike','bolt','charge'], coven: ['bolt','nova','beam'],
+    warden: ['guard','nova','strike'], ferryman: ['bolt','charge','nova'], choir: ['beam','nova','bolt'],
+    butler: ['charge','strike','bolt'], sanguine: ['charge','nova','bolt'], executioners: ['strike','charge','nova'],
+    vael: ['bolt','beam','strike'], scarab: ['charge','nova','strike'], pharaoh: ['beam','bolt','nova'],
+    astrel: ['bolt','beam','charge'], orrery: ['bolt','nova','beam'], enforcer: ['beam','charge','bolt'],
+    saint0: ['beam','nova','bolt'], venn: ['bolt','charge','nova'],
+  };
+  const studioArenaEffects = [], studioArenaProjectiles = [];
+  function moveStudioFighter(fighter, x, floorY) {
+    const moved = x - fighter.x, rise = floorY - (fighter.floor ?? fighter.y);
+    fighter.x = x; fighter.y += rise; if (Number.isFinite(fighter.floor)) fighter.floor = floorY;
+    if (Number.isFinite(fighter.baseY)) fighter.baseY += rise;
+    if (Number.isFinite(fighter.hoverY)) fighter.hoverY += rise;
+    if (fighter.parts) for (const part of fighter.parts) { if (Number.isFinite(part.x)) part.x += moved; if (Number.isFinite(part.y)) part.y += rise; if (Number.isFinite(part.floor)) part.floor += rise; }
+    if (fighter.spine) for (const point of fighter.spine) { if (Number.isFinite(point.x)) point.x += moved; if (Number.isFinite(point.y)) point.y += rise; }
+  }
+  function studioCanHit(attacker, target) {
+    return target === P ? arenaSettings.playerTeam !== 'spectator' && arenaSettings.playerTeam !== attacker.__studioTeam && P.state !== 'dead'
+      : target && target.alive && target.__studioTeam !== attacker.__studioTeam;
+  }
+  function studioDealDamage(attacker, target, damage) {
+    if (!studioCanHit(attacker, target)) return false;
+    if (target === P) hurtPlayer(Math.min(95, damage * 0.45), attacker.face, ++hazardId, { src: attacker, parryable: true });
+    else target.hit({ dmg: damage, x: target.x, y: target.y - 35, dir: attacker.face, poise: 0 });
+    spawnFx('hit', target.x, target.y - 35, attacker.face);
+    shake = Math.max(shake, 3.5);
+    return true;
+  }
+  function studioDamageFor(attacker, target, multiplier = 1) {
+    const scaleHp = target === P ? attacker.__studioBaseHp : target.maxHp;
+    return Math.max(18, Math.round(scaleHp * 0.055 * arenaSettings.damagePct / 100 * multiplier));
+  }
+  function studioEffect(type, x, y, color, x2, y2) {
+    studioArenaEffects.push({ type, x, y, x2, y2, color, age: 0, life: 0.42 });
+    if (studioArenaEffects.length > 80) studioArenaEffects.shift();
+  }
+  function studioChooseMove(fighter, distance) {
+    const deck = studioAbilityDecks[fighter.kind] || ['strike','bolt','nova'];
+    const index = fighter.__studioMoveIndex || 0;
+    fighter.__studioMoveIndex = index + 1;
+    const chosen = deck[index % deck.length];
+    return chosen === 'strike' && distance > 170 ? 'bolt' : chosen;
+  }
+  function studioResolveMove(fighter, move) {
+    const { type, target, aimX } = move;
+    if (!fighter.alive || !studioCanHit(fighter, target)) return;
+    const color = fighter.__studioTeamColor || '#e0a36b';
+    if (type === 'guard') { fighter.__studioShieldUntil = time + 2.4; studioEffect('guard', fighter.x, fighter.y - 38, color); return; }
+    if (type === 'charge') {
+      const fromX = fighter.x, landingX = clamp(target.x - fighter.face * 58, TILE + 25, room.pw - TILE - 25);
+      const floorY = studioFloorAt(landingX, (fighter.floor ?? fighter.y) - TILE * 2) ?? (fighter.floor ?? fighter.y);
+      moveStudioFighter(fighter, landingX, floorY);
+      studioEffect('charge', fromX, fighter.y - 35, color, fighter.x, fighter.y - 35);
+      if (Math.abs(target.x - fighter.x) < 115) studioDealDamage(fighter, target, studioDamageFor(fighter, target, 1.25));
+      return;
+    }
+    if (type === 'nova') {
+      studioEffect('nova', fighter.x, fighter.y - 30, color);
+      for (const victim of [...studioBosses, P]) if (victim !== fighter && studioCanHit(fighter, victim) && Math.hypot(victim.x - fighter.x, victim.y - fighter.y) < 175) studioDealDamage(fighter, victim, studioDamageFor(fighter, victim, 0.9));
+      return;
+    }
+    if (type === 'beam') {
+      const endX = clamp(aimX, fighter.x - 360, fighter.x + 360);
+      studioEffect('beam', fighter.x, fighter.y - 42, color, endX, target.y - 38);
+      for (const victim of [...studioBosses, P]) if (victim !== fighter && studioCanHit(fighter, victim) && victim.x >= Math.min(fighter.x, endX) - 25 && victim.x <= Math.max(fighter.x, endX) + 25 && Math.abs(victim.y - target.y) < 90) studioDealDamage(fighter, victim, studioDamageFor(fighter, victim, 0.85));
+      return;
+    }
+    if (type === 'bolt') {
+      studioArenaProjectiles.push({ owner: fighter, target, x: fighter.x, y: fighter.y - 42, color, damage: studioDamageFor(fighter, target, 1.05), life: 2.2 });
+      if (studioArenaProjectiles.length > 80) studioArenaProjectiles.shift();
+      return;
+    }
+    studioEffect('strike', fighter.x, fighter.y - 38, color, target.x, target.y - 38);
+    if (Math.abs(target.x - fighter.x) < 165) studioDealDamage(fighter, target, studioDamageFor(fighter, target));
+  }
+  function updateStudioAbilities(dt) {
+    for (let i = studioArenaEffects.length - 1; i >= 0; i--) if ((studioArenaEffects[i].age += dt) >= studioArenaEffects[i].life) studioArenaEffects.splice(i, 1);
+    for (let i = studioArenaProjectiles.length - 1; i >= 0; i--) {
+      const p = studioArenaProjectiles[i]; p.life -= dt;
+      if (p.life <= 0 || !studioCanHit(p.owner, p.target)) { studioArenaProjectiles.splice(i, 1); continue; }
+      const dx = p.target.x - p.x, dy = p.target.y - 38 - p.y, distance = Math.hypot(dx, dy);
+      const step = 360 * dt;
+      if (distance <= step + 15) { studioDealDamage(p.owner, p.target, p.damage); studioEffect('nova', p.target.x, p.target.y - 38, p.color); studioArenaProjectiles.splice(i, 1); }
+      else { p.x += dx / distance * step; p.y += dy / distance * step; }
+    }
+  }
   function makeStudioBoss(kind, x, y, team) {
     const factory = BOSS_SPAWN[kind] || fallbackBossFactories[kind];
     const fighter = factory && factory(x, y, { kind });
@@ -432,7 +534,8 @@
     fighter.hurtbox = () => { let hit = null; try { hit = nativeHurtbox && nativeHurtbox(); } catch (_) {} return hit || rect(fighter.x - 35, fighter.y - 78, fighter.x + 35, fighter.y); };
     fighter.hit = info => {
       if (!fighter.alive) return;
-      const damage = Math.max(0, Math.round(Number(info && info.dmg) || 0));
+      const shield = time < (fighter.__studioShieldUntil || 0) ? 0.5 : 1;
+      const damage = Math.max(0, Math.round((Number(info && info.dmg) || 0) * shield));
       fighter.hp = Math.max(0, fighter.hp - damage); fighter.flash = 0.75;
       fighter.dmgShown = damage; fighter.dmgT = 1.4;
       if (fighter.hp <= 0) fighter.die();
@@ -440,14 +543,15 @@
     fighter.die = () => {
       if (fighter.state === 'dead') return;
       fighter.hp = 0; fighter.state = 'dead'; fighter.active = false;
-      fighter.__studioDeathAt = time; fighter.__studioWindup = 0; fighter.__studioPendingTarget = null; fighter.__studioAttackPlaying = false;
+      fighter.__studioDeathAt = time; fighter.__studioWindup = 0; fighter.__studioPendingMove = null; fighter.__studioAttackPlaying = false;
       if (fighter.sh && fighter.sh.has('death')) fighter.anim.set('death', false, 1);
       if (fighter.parts) for (const part of fighter.parts) { part.state = 'dead'; part.__studioAttackPlaying = false; if (part.anim && part.sh && part.sh.has('death')) part.anim.set('death', false, 1); }
     };
     return fighter;
   }
   function stopBossExhibition() {
-    studioBosses.length = 0; studioBossRoom = null; studioTournament = null; studioActiveTeams = []; studioBattleWinner = null; studioArenaPaused = false;
+    studioBosses.length = 0; studioArenaEffects.length = 0; studioArenaProjectiles.length = 0;
+    studioBossRoom = null; studioTournament = null; studioActiveTeams = []; studioBattleWinner = null; studioArenaPaused = false;
   }
   function spawnNativeBoss(kind) {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
@@ -497,14 +601,15 @@
     spawnTeamFighters(teams);
     toast(count + ' ' + BOSS_INFO[kind].name + (mode === 'hunt' ? ' hunting the player' : ' in a free-for-all'), 4);
   }
-  function spawnTeamFighters(teams) {
+  function spawnTeamFighters(teams, compact = false) {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
     const planned = teams.reduce((sum, team) => sum + team.roster.reduce((n, row) => n + row.count, 0), 0);
     if (!planned) throw new Error('Add at least one boss to a team first.');
     studioBossRoom = room.id;
     const areaLeft = TILE + 42, areaWidth = Math.max(80, room.pw - 2 * areaLeft);
     for (let ti = 0; ti < teams.length; ti++) {
-      const team = teams[ti], baseX = areaLeft + areaWidth * (ti + 0.5) / teams.length;
+      const team = teams[ti], duelCenter = clamp(P.x, TILE + 190, room.pw - TILE - 190);
+      const baseX = compact ? duelCenter + (ti - (teams.length - 1) / 2) * 250 : areaLeft + areaWidth * (ti + 0.5) / teams.length;
       let slot = 0;
       for (const row of team.roster) for (let n = 0; n < row.count; n++) {
         const x = clamp(baseX + ((slot % 5) - 2) * 20, TILE + 25, room.pw - TILE - 25);
@@ -533,29 +638,35 @@
     try { count = spawnTeamFighters(ready); } catch (error) { studioBosses.length = before; if (!before) studioBossRoom = null; throw error; }
     toast((reinforce ? 'Reinforcements: ' : 'Team battle: ') + count + ' bosses across ' + ready.length + ' teams', 4);
   }
-  function startBossClash(firstKind, secondKind) {
+  function startBossClash(firstKind, secondKind, playerMode = 'spectator') {
     stopBossExhibition();
-    arenaSettings = { ...teamSetup, playerTeam: 'spectator', playerAggro: 0 };
+    arenaSettings = { ...teamSetup, playerTeam: playerMode === 'neutral' ? 'neutral' : 'spectator', playerAggro: playerMode === 'neutral' ? 35 : 0 };
     spawnTeamFighters([
       { id: 'bracketA', name: 'Ember', color: teamPalette[0], roster: [{ kind: firstKind, count: 1 }] },
       { id: 'bracketB', name: 'Ash', color: teamPalette[1], roster: [{ kind: secondKind, count: 1 }] },
-    ]);
+    ], true);
   }
-  function startBossTournament(size = 8) {
+  function startBossTournament(size = 8, playerMode = 'spectator') {
     if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
     const queue = bossKinds.slice();
     if (queue.length < 2) throw new Error('This game build has too few spawnable bosses.');
     for (let i = queue.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [queue[i], queue[j]] = [queue[j], queue[i]]; }
     size = [2,4,8,16].includes(Number(size)) ? Number(size) : 8;
     queue.length = [16,8,4,2].find(n => n <= size && n <= queue.length) || 2;
-    const bracket = { queue, winners: [], round: 1, totalRounds: Math.log2(queue.length), pair: 0, nextAt: 0 };
+    const bracket = { queue, winners: [], round: 1, totalRounds: Math.log2(queue.length), pair: 0, nextAt: 0, playerMode };
     const first = bracket.queue.shift(), second = bracket.queue.shift();
-    startBossClash(first, second); bracket.pair = 1; studioTournament = bracket;
+    startBossClash(first, second, playerMode); bracket.pair = 1; bracket.matchAt = time; studioTournament = bracket;
     toast('Boss Tournament · round 1 of ' + bracket.totalRounds, 4);
   }
-  function updateBossTournament() {
+  function updateBossTournament(dt) {
     const bracket = studioTournament;
-    if (!bracket || studioBosses.length !== 2 || studioBosses.every(f => f.alive)) return;
+    if (!bracket || studioBosses.length !== 2) return;
+    if (studioArenaPaused) { bracket.matchAt += dt; if (bracket.nextAt) bracket.nextAt += dt; return; }
+    if (studioBosses.every(f => f.alive) && time - bracket.matchAt > 85) {
+      const loser = studioBosses[0].hp / studioBosses[0].maxHp < studioBosses[1].hp / studioBosses[1].maxHp ? studioBosses[0] : studioBosses[1];
+      loser.die(); toast('Match time limit · judges decide', 3);
+    }
+    if (studioBosses.every(f => f.alive)) return;
     if (!bracket.nextAt) {
       const winner = studioBosses.find(f => f.alive) || studioBosses[0];
       bracket.winners.push(winner.kind); bracket.nextAt = time + 2; toast(winner.name + ' advances', 2); return;
@@ -566,7 +677,7 @@
       bracket.queue = bracket.winners.splice(0); bracket.round++; bracket.pair = 0;
     }
     const first = bracket.queue.shift(), second = bracket.queue.shift();
-    startBossClash(first, second); bracket.pair++; bracket.nextAt = 0; studioTournament = bracket;
+    startBossClash(first, second, bracket.playerMode); bracket.pair++; bracket.nextAt = 0; bracket.matchAt = time; studioTournament = bracket;
     toast('Tournament round ' + bracket.round + ' · match ' + bracket.pair, 3);
   }
   const nativeTargets = targets;
@@ -576,10 +687,11 @@
     return list;
   };
   function updateBossClash(dt) {
-    if (!studioBosses.length) return;
+    if (!studioBosses.length) { studioArenaEffects.length = 0; studioArenaProjectiles.length = 0; return; }
     if (state !== 'play' || !room || room.id !== studioBossRoom) { stopBossExhibition(); return; }
     if (studioArenaPaused) return;
     dt = (Number(dt) || 1 / 60) * modState.bossFightSpeed / 100;
+    updateStudioAbilities(dt);
     const living = studioBosses.filter(f => f.alive && f.hp > 0);
     for (const fighter of studioBosses) {
       if (!fighter.alive && fighter.__studioDeathAt === undefined) fighter.__studioDeathAt = time;
@@ -600,43 +712,31 @@
       if (!target) continue;
       const distance = Math.abs(target.x - fighter.x);
       fighter.face = target.x < fighter.x ? -1 : 1;
-      if (distance > 72) {
+      const deck = studioAbilityDecks[fighter.kind] || ['strike','bolt','nova'];
+      const desiredDistance = deck.includes('bolt') || deck.includes('beam') ? 145 : 72;
+      if (distance > desiredDistance && !(fighter.__studioWindup > 0)) {
         const dx = fighter.face * 62 * dt;
         const nextX = clamp(fighter.x + dx, TILE + 25, room.pw - TILE - 25);
         const nextFloor = studioFloorAt(nextX, (fighter.floor ?? fighter.y) - TILE - 2);
-        if (nextFloor !== null && Math.abs(nextFloor - (fighter.floor ?? fighter.y)) <= TILE * 2) {
-          const moved = nextX - fighter.x, rise = nextFloor - (fighter.floor ?? fighter.y);
-          fighter.x = nextX; fighter.y += rise; if (Number.isFinite(fighter.floor)) fighter.floor = nextFloor;
-          if (Number.isFinite(fighter.baseY)) fighter.baseY += rise;
-          if (Number.isFinite(fighter.hoverY)) fighter.hoverY += rise;
-          if (fighter.parts) for (const part of fighter.parts) { if (Number.isFinite(part.x)) part.x += moved; if (Number.isFinite(part.y)) part.y += rise; if (Number.isFinite(part.floor)) part.floor += rise; }
-          if (fighter.spine) for (const point of fighter.spine) { if (Number.isFinite(point.x)) point.x += moved; if (Number.isFinite(point.y)) point.y += rise; }
-        }
+        if (nextFloor !== null && Math.abs(nextFloor - (fighter.floor ?? fighter.y)) <= TILE * 2) moveStudioFighter(fighter, nextX, nextFloor);
       }
       fighter.__studioSwing = Math.max(0, fighter.__studioSwing - dt);
       fighter.__studioNextHit -= dt;
       const wasWinding = fighter.__studioWindup > 0;
       if (wasWinding) fighter.__studioWindup -= dt;
-      if (!fighter.__studioWindup && fighter.__studioNextHit <= 0 && distance < 115) {
-        fighter.__studioNextHit = 0.8 + Math.random() * 0.6;
-        fighter.__studioSwing = 0.55;
-        fighter.__studioWindup = 0.23;
-        fighter.__studioPendingTarget = target;
-        playStudioAttack(fighter);
+      if (!wasWinding && fighter.__studioNextHit <= 0) {
+        const type = studioChooseMove(fighter, distance);
+        fighter.__studioNextHit = (type === 'strike' ? 0.95 : type === 'guard' ? 2.2 : 1.55) + Math.random() * 0.35;
+        fighter.__studioSwing = 0.65;
+        fighter.__studioWindup = type === 'beam' || type === 'nova' ? 0.55 : type === 'guard' ? 0.35 : 0.3;
+        fighter.__studioPendingMove = { type, target, aimX: target.x };
+        playStudioAttack(fighter, type);
       }
       if (wasWinding && fighter.__studioWindup <= 0) {
         fighter.__studioWindup = 0;
-        const victim = fighter.__studioPendingTarget;
-        fighter.__studioPendingTarget = null;
-        if (!victim || (victim !== P && !victim.alive) || Math.abs(victim.x - fighter.x) > 130) continue;
-        const damage = Math.max(14, Math.round(fighter.__studioBaseHp * (0.035 + Math.random() * 0.02) * arenaSettings.damagePct / 100));
-        if (victim === P) {
-          hurtPlayer(Math.min(90, damage * 0.4), fighter.face, ++hazardId, { src: fighter, parryable: true });
-        } else if (victim.alive) {
-          victim.hit({ dmg: damage, x: victim.x, y: victim.y - 35, dir: fighter.face, poise: 0 });
-          spawnFx('hit', victim.x, victim.y - 35, fighter.face);
-        }
-        shake = Math.max(shake, 3.5);
+        const move = fighter.__studioPendingMove;
+        fighter.__studioPendingMove = null;
+        if (move) studioResolveMove(fighter, move);
       }
     }
     if (!studioBattleWinner && !studioTournament && studioActiveTeams.length > 1) {
@@ -681,12 +781,32 @@
         g.restore();
       }
       if (fighter.alive && fighter.__studioWindup > 0) {
-        g.save(); g.globalAlpha = 0.35 + 0.3 * Math.sin(time * 35);
+        const move = fighter.__studioPendingMove || { type: 'strike', aimX: fighter.x + fighter.face * 70 };
+        g.save(); g.globalAlpha = 0.4 + 0.25 * Math.sin(time * 35);
         g.strokeStyle = fighter.__studioTeamColor || '#f1b16c'; g.lineWidth = 2;
-        g.beginPath(); g.ellipse(Math.round(fighter.x), Math.round(fighter.floor || fighter.y) - 2, 30, 5, 0, 0, Math.PI * 2); g.stroke();
+        g.beginPath();
+        if (move.type === 'nova') g.arc(fighter.x, fighter.y - 30, 175, 0, Math.PI * 2);
+        else if (move.type === 'beam' || move.type === 'charge') { g.moveTo(fighter.x, fighter.y - 40); g.lineTo(move.aimX, fighter.y - 40); }
+        else g.ellipse(Math.round(fighter.x), Math.round(fighter.floor || fighter.y) - 2, 36, 6, 0, 0, Math.PI * 2);
+        g.stroke();
+        g.font = 'bold 8px sans-serif'; g.textAlign = 'center'; g.fillStyle = fighter.__studioTeamColor || '#f1b16c';
+        g.fillText(move.type.toUpperCase(), fighter.x, fighter.y - 85);
         g.restore();
       }
       g.restore(); studioCorpseAlpha = previousAlpha;
+    }
+    for (const effect of studioArenaEffects) {
+      const progress = effect.age / effect.life;
+      g.save(); g.globalAlpha = Math.max(0, 1 - progress) * 0.75; g.strokeStyle = effect.color;
+      g.shadowColor = effect.color; g.shadowBlur = 12; g.lineWidth = effect.type === 'beam' ? 12 : 6;
+      g.beginPath();
+      if (effect.type === 'nova' || effect.type === 'guard') g.arc(effect.x, effect.y, (effect.type === 'nova' ? 175 : 60) * progress, 0, Math.PI * 2);
+      else { g.moveTo(effect.x, effect.y); g.lineTo(effect.x + ((effect.x2 ?? effect.x) - effect.x) * Math.min(1, progress * 3), effect.y + ((effect.y2 ?? effect.y) - effect.y) * Math.min(1, progress * 3)); }
+      g.stroke(); g.restore();
+    }
+    for (const p of studioArenaProjectiles) {
+      g.save(); g.fillStyle = p.color; g.shadowColor = p.color; g.shadowBlur = 14;
+      g.beginPath(); g.arc(p.x, p.y, 7, 0, Math.PI * 2); g.fill(); g.restore();
     }
   });
   const nativeUpdateCamera = updateCamera;
@@ -1140,7 +1260,7 @@
       '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting. Zoom out as far as 5×.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="500" step="10" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
       '<section class="cs-page" data-page="inventory"><div class="cs-pagehead"><div><h2>Inventory & Progression</h2><p>Currency, flasks, materials, skills, spells, and equipment ownership.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Economy</h3><div class="cs-fields">' + field('cinders','Cinders',SAVE.cinders) + field('shards','Skill shards',SAVE.shards) + field('emberstone','Emberstone',SAVE.inv.emberstone || 0) + '</div></div><div class="cs-card"><h3>Flasks</h3><div class="cs-fields">' + field('flaskBase','Total charges',SAVE.flaskBase) + field('flaskBlue','Azure allocation',SAVE.flaskBlue) + field('flaskPot','Flask potency',SAVE.flaskPot) + '</div></div><div class="cs-card wide"><h3>Ownership</h3><div class="cs-actions"><button class="cs-btn" data-action="ownership">Safely unlock all gear, skills and charms</button><button class="cs-btn" data-action="currency">Max currencies and materials</button><button class="cs-btn" data-action="save">Commit inventory to save</button><button class="cs-btn" data-action="fireworks">Preview reward effect</button></div><p class="cs-help" style="margin-top:10px">Preserves the equipped loadout and follows the game’s mutually exclusive skill-tree rules.</p></div></div></section>',
       '<section class="cs-page" data-page="combat"><div class="cs-pagehead"><div><h2>Combat Systems</h2><p>Damage, AI control, defensive automation, and arsenal behavior.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Damage model</h3><div class="cs-field"><label>Global weapon base power</label><input class="cs-range" type="range" min="1" max="100000" step="100" data-range="weaponPower"><output data-output="weaponPower"></output></div>' + toggle('oneHit','One-hit hostiles','Set enemies and bosses to one HP') + toggle('killAura','Kill aura','Defeat nearby targets automatically') + '</div><div class="cs-card"><h3>AI & projectiles</h3>' + toggle('freeze','Freeze all AI','Stops enemies and active bosses') + toggle('vacuum','Enemy vacuum','Pull enemies toward the player') + toggle('shield','Projectile shield','Remove enemy shots and hazards') + '</div><div class="cs-card wide"><h3>Arsenal automation</h3>' + toggle('randomArsenal','Random arsenal','Cycle random weapons and arts') + toggle('storm','Cinder aura','Persistent ambient particle field') + '<div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-action="fireworks">Cinderfall effect</button><button class="cs-btn" data-action="clear">Clear active combat</button></div></div></div></section>',
-      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Native Boss Spawn</h3><p class="cs-help">One original game AI boss at a time. Some bosses depend on their story arena. Spawned bosses give no story rewards.</p><div class="cs-fields"><div class="cs-field"><label>Boss</label><select class="cs-select" data-native-kind></select></div><div class="cs-field"><label>AI mode</label><div class="cs-duel-readout">Original movement and attacks</div></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="native">Spawn native boss</button><button class="cs-btn danger" data-boss-action="native-clear">Clear spawned boss</button></div></div><div class="cs-card wide"><h3>Quick Boss Arena</h3><p class="cs-help">Launch several copies instantly. Free-for-all bosses fight each other; Hunters chase the player. Start replaces the arena; Add brings in another wave.</p><div class="cs-fields four"><div class="cs-field"><label>Boss</label><select class="cs-select" data-quick-kind></select></div><div class="cs-field"><label>How many</label><input class="cs-input" type="number" min="1" max="50" value="3" data-quick-count></div><div class="cs-field"><label>Fight type</label><select class="cs-select" data-quick-mode><option value="brawl">Free-for-all</option><option value="hunt">Hunt player</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="quick">Start quick fight</button><button class="cs-btn" data-boss-action="quick-add">Add another wave</button></div></div><div class="cs-card wide"><h3>One-on-One Duel</h3><p class="cs-help">Pick two bosses and watch them duel. The player spectates but can still attack either fighter.</p><div class="cs-fields"><div class="cs-field"><label>First boss</label><select class="cs-select" data-duel-a></select></div><div class="cs-field"><label>Second boss</label><select class="cs-select" data-duel-b></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="duel">Start duel</button></div></div><div class="cs-card wide"><h3>Team Battle Forge</h3><p class="cs-help">Build mixed rosters with up to eight named teams. Set player allegiance and balance below. Arena fighters can be hit by the player and give no story rewards.</p><div class="cs-team-toolbar"><span data-boss-catalog-count></span><div><button class="cs-btn" data-team-action="add">+ Add team</button><button class="cs-btn" data-team-action="reset">Reset setup</button></div></div><div class="cs-team-list" data-team-list></div><div class="cs-fields four" style="margin-top:14px"><div class="cs-field"><label>Player side</label><select class="cs-select" data-team-player></select></div><div class="cs-field"><label>Player target chance</label><input class="cs-range" type="range" min="0" max="100" step="5" data-team-setting="playerAggro"><output data-team-output="playerAggro"></output></div><div class="cs-field"><label>Boss health</label><input class="cs-range" type="range" min="25" max="500" step="25" data-team-setting="hpPct"><output data-team-output="hpPct"></output></div><div class="cs-field"><label>Boss damage</label><input class="cs-range" type="range" min="25" max="300" step="25" data-team-setting="damagePct"><output data-team-output="damagePct"></output></div><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow arena</option></select></div><div class="cs-field full"><label class="cs-toggle"><div><strong>Friendly fire</strong><small>Your attacks can damage your own team when enabled.</small></div><input type="checkbox" data-team-friendly></label></div></div><div class="cs-actions" style="margin-top:12px"><button class="cs-btn primary" data-boss-action="start">Start team battle</button><button class="cs-btn" data-boss-action="reinforce">Send reinforcements</button></div></div><div class="cs-card wide"><h3>Random Tournament</h3><p class="cs-help">Random unique bosses enter a single-elimination bracket. New matches launch automatically after each knockout.</p><div class="cs-fields"><div class="cs-field"><label>Entrants</label><select class="cs-select" data-tournament-size><option value="2">2 · one match</option><option value="4">4 · two rounds</option><option value="8" selected>8 · three rounds</option><option value="16">16 · four rounds</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="tournament">Start tournament</button></div></div><div class="cs-card wide"><h3>Active Arena</h3><p class="cs-help">These controls apply to quick fights, duels, team battles and tournaments. Each living boss has a separate health bar; dead bars disappear.</p><div class="cs-actions"><button class="cs-btn" data-boss-action="pause">Pause arena AI</button><button class="cs-btn" data-boss-action="heal">Heal all fighters</button><button class="cs-btn danger wide" data-boss-action="stop">Clear arena</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena battle running.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
+      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Native Boss Spawn</h3><p class="cs-help">One original game AI boss at a time. Some bosses depend on their story arena. Spawned bosses give no story rewards.</p><div class="cs-fields"><div class="cs-field"><label>Boss</label><select class="cs-select" data-native-kind></select></div><div class="cs-field"><label>AI mode</label><div class="cs-duel-readout">Original movement and attacks</div></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="native">Spawn native boss</button><button class="cs-btn danger" data-boss-action="native-clear">Clear spawned boss</button></div></div><div class="cs-card wide"><h3>Quick Boss Arena</h3><p class="cs-help">Launch several copies instantly. Free-for-all bosses fight each other; Hunters chase the player. Start replaces the arena; Add brings in another wave.</p><div class="cs-fields four"><div class="cs-field"><label>Boss</label><select class="cs-select" data-quick-kind></select></div><div class="cs-field"><label>How many</label><input class="cs-input" type="number" min="1" max="50" value="3" data-quick-count></div><div class="cs-field"><label>Fight type</label><select class="cs-select" data-quick-mode><option value="brawl">Free-for-all</option><option value="hunt">Hunt player</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="quick">Start quick fight</button><button class="cs-btn" data-boss-action="quick-add">Add another wave</button></div></div><div class="cs-card wide"><h3>One-on-One Duel</h3><p class="cs-help">Pick two bosses and watch them duel. The player spectates but can still attack either fighter.</p><div class="cs-fields"><div class="cs-field"><label>First boss</label><select class="cs-select" data-duel-a></select></div><div class="cs-field"><label>Second boss</label><select class="cs-select" data-duel-b></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="duel">Start duel</button></div></div><div class="cs-card wide"><h3>Team Battle Forge</h3><p class="cs-help">Build mixed rosters with up to eight named teams. Set player allegiance and balance below. Arena fighters can be hit by the player and give no story rewards.</p><div class="cs-team-toolbar"><span data-boss-catalog-count></span><div><button class="cs-btn" data-team-action="add">+ Add team</button><button class="cs-btn" data-team-action="reset">Reset setup</button></div></div><div class="cs-team-list" data-team-list></div><div class="cs-fields four" style="margin-top:14px"><div class="cs-field"><label>Player side</label><select class="cs-select" data-team-player></select></div><div class="cs-field"><label>Player target chance</label><input class="cs-range" type="range" min="0" max="100" step="5" data-team-setting="playerAggro"><output data-team-output="playerAggro"></output></div><div class="cs-field"><label>Boss health</label><input class="cs-range" type="range" min="25" max="500" step="25" data-team-setting="hpPct"><output data-team-output="hpPct"></output></div><div class="cs-field"><label>Boss damage</label><input class="cs-range" type="range" min="25" max="300" step="25" data-team-setting="damagePct"><output data-team-output="damagePct"></output></div><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow arena</option></select></div><div class="cs-field full"><label class="cs-toggle"><div><strong>Friendly fire</strong><small>Your attacks can damage your own team when enabled.</small></div><input type="checkbox" data-team-friendly></label></div></div><div class="cs-actions" style="margin-top:12px"><button class="cs-btn primary" data-boss-action="start">Start team battle</button><button class="cs-btn" data-boss-action="reinforce">Send reinforcements</button></div></div><div class="cs-card wide"><h3>Random Tournament</h3><p class="cs-help">Random unique bosses enter a single-elimination bracket with adapted signature moves, telegraphs, projectiles, charges, and area attacks. New matches launch after each knockout.</p><div class="cs-fields"><div class="cs-field"><label>Entrants</label><select class="cs-select" data-tournament-size><option value="2">2 · one match</option><option value="4">4 · two rounds</option><option value="8" selected>8 · three rounds</option><option value="16">16 · four rounds</option></select></div><div class="cs-field"><label>Your role</label><select class="cs-select" data-tournament-player><option value="spectator">Spectate · bosses ignore you</option><option value="neutral">Free-for-all · bosses may attack you</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="tournament">Start tournament</button></div></div><div class="cs-card wide"><h3>Active Arena</h3><p class="cs-help">These controls apply to quick fights, duels, team battles and tournaments. Each living boss has a separate health bar; dead bars disappear.</p><div class="cs-actions"><button class="cs-btn" data-boss-action="pause">Pause arena AI</button><button class="cs-btn" data-boss-action="heal">Heal all fighters</button><button class="cs-btn danger wide" data-boss-action="stop">Clear arena</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena battle running.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
       '<section class="cs-page" data-page="gear"><div class="cs-pagehead"><div><h2>Professional Weapon Lab</h2><p>Author melee weapons, firearms, shotguns, launchers, and arcane guns with native combat integration.</p></div><span class="cs-badge">Persistent runtime weapons</span></div><form id="cs-weapon-form"><div class="cs-grid"><div class="cs-card wide"><h3>Identity & architecture</h3><div class="cs-fields four"><div class="cs-field"><label>Internal ID</label><input class="cs-input" name="id" value="studio_ember_rifle"></div><div class="cs-field"><label>Display name</label><input class="cs-input" name="name" value="Emberline Rifle"></div><div class="cs-field"><label>Weapon architecture</label><select class="cs-select" name="mode"><option value="melee">Melee only</option><option value="handgun">Handgun</option><option value="rifle" selected>Automatic rifle</option><option value="shotgun">Shotgun</option><option value="launcher">Launcher</option><option value="arcane">Arcane focus</option></select></div><div class="cs-field"><label>Base animation template</label><select class="cs-select" name="template" data-weapon-template></select></div><div class="cs-field"><label>Weapon art</label><select class="cs-select" name="art" data-art-template></select></div><div class="cs-field full"><label>Description</label><input class="cs-input" name="desc" value="A precision firearm authored in Cinderhollow Studio."></div></div></div>',
       '<div class="cs-card"><h3>Melee chassis</h3><div class="cs-fields">' + field('base','Base damage',120) + field('speed','Attack animation speed',1.8) + field('reach','Melee reach',1) + field('stam','Stamina cost',0.2) + field('poise','Melee poise',2) + '</div></div><div class="cs-card"><h3>Elemental melee profile</h3><div class="cs-fields">' + field('fire','Fire multiplier',0) + field('holy','Holy multiplier',0) + field('frost','Frost buildup',0) + field('bleed','Bleed buildup',0) + '</div></div>',
       '<div class="cs-card wide"><h3>Fire control & aiming</h3><div class="cs-fields four"><div class="cs-field"><label>Aim system</label><select class="cs-select" name="aimMode"><option value="directional">Keyboard directional</option><option value="cursor">Mouse cursor</option><option value="nearest">Auto-aim nearest</option><option value="facing">Facing direction</option></select></div><div class="cs-field"><label>Fire trigger</label><select class="cs-select" name="fireTrigger"><option value="light">Basic attack</option><option value="heavy">Heavy attack</option><option value="both">Both attacks</option></select></div><div class="cs-field"><label>Projectile visual</label><select class="cs-select" name="projectileVisual"><option value="ashbolt">Ember round</option><option value="sunspear">Sun spear</option><option value="shard">Arcane shard</option><option value="lance">Blue lance</option><option value="crescent">Blade wave</option><option value="arrow">Physical round</option></select></div><label class="cs-toggle"><div><strong>Full automatic</strong><small>Hold basic attack to keep firing</small></div><input type="checkbox" name="fullAuto" checked></label></div><div class="cs-fields four" style="margin-top:12px">' + field('fireRate','Rounds per second',8) + field('magSize','Magazine size',30) + field('reloadTime','Reload time (seconds)',1.2) + field('shotDamage','Shot damage multiplier',1.4) + field('critChance','Critical chance %',10) + field('critMultiplier','Critical multiplier',2) + field('recoil','Recoil force',25) + field('screenShake','Screen shake',2) + '</div></div>',
@@ -1269,7 +1389,7 @@
         else if (action === 'native-clear') clearNativeBoss();
         else if (action === 'quick' || action === 'quick-add') startQuickBattle(root.querySelector('[data-quick-kind]').value, root.querySelector('[data-quick-count]').value, root.querySelector('[data-quick-mode]').value, action === 'quick-add');
         else if (action === 'duel') { startBossClash(root.querySelector('[data-duel-a]').value, root.querySelector('[data-duel-b]').value); toast('One-on-one duel started', 3); }
-        else if (action === 'tournament') startBossTournament(root.querySelector('[data-tournament-size]').value);
+        else if (action === 'tournament') startBossTournament(root.querySelector('[data-tournament-size]').value, root.querySelector('[data-tournament-player]').value);
         else if (action === 'pause') { studioArenaPaused = !studioArenaPaused; button.textContent = studioArenaPaused ? 'Resume arena AI' : 'Pause arena AI'; }
         else if (action === 'heal') { for (const fighter of studioBosses) if (fighter.alive) fighter.hp = fighter.displayHp = fighter.maxHp; toast('Living fighters healed', 2); }
         else stopBossExhibition();
