@@ -572,7 +572,213 @@
     };
     return fighter;
   }
+  const nativeArenaFighters = [];
+  let nativeArenaRoom = null, nativeArenaWinner = null, nativeArenaFlags = null, nativeArenaCinders = 0, nativeArenaContext = null;
+  const gameTargets = targets, gamePlayerHurtbox = playerHurtbox, gameHurtPlayer = hurtPlayer;
+  const gameUpdateProjectiles = updateProjectiles, gameUpdateHazards = updateHazards;
+  const gameBossCutsceneStart = bossCutsceneStart, gameBossPhase2Scene = bossPhase2Scene, gamePlayCutscene = playCutscene, gameSaveGame = saveGame;
+  function nativeFoes(owner) {
+    return nativeArenaFighters.filter(f => f !== owner && f.alive && !f.__nativeBroken && f.__nativeTeam !== owner.__nativeTeam);
+  }
+  function nativeTarget(owner) {
+    const foes = nativeFoes(owner);
+    return foes.reduce((best, f) => !best || Math.abs(f.x - owner.x) < Math.abs(best.x - owner.x) ? f : best, null);
+  }
+  function withNativeTarget(owner, target, callback) {
+    const oldP = P, oldBoss = boss, oldContext = nativeArenaContext;
+    nativeArenaContext = { owner, target };
+    P = target; boss = owner;
+    try { return callback(); } finally { P = oldP; boss = oldBoss; nativeArenaContext = oldContext; }
+  }
+  targets = function studioNativeTargets() {
+    if (nativeArenaContext) return nativeFoes(nativeArenaContext.owner);
+    const result = gameTargets();
+    for (const f of nativeArenaFighters) if (f.alive && f.active && !f.__nativeBroken) result.push(f);
+    return result;
+  };
+  playerHurtbox = function studioNativeHurtbox() {
+    if (!nativeArenaContext) return gamePlayerHurtbox();
+    const f = nativeArenaContext.target;
+    try { return f.hurtbox() || rect(f.x - 35, f.y - 75, f.x + 35, f.y); }
+    catch (_) { return rect(f.x - 35, f.y - 75, f.x + 35, f.y); }
+  };
+  hurtPlayer = function studioNativeHurt(damage, direction, hitId, options = {}) {
+    if (!nativeArenaContext) return gameHurtPlayer(damage, direction, hitId, options);
+    const { owner, target } = nativeArenaContext;
+    if (!target || !target.alive || target.__nativeTeam === owner.__nativeTeam) return false;
+    const key = String(owner.__nativeSerial) + ':' + String(hitId);
+    if (time - (target.__nativeHitIds.get(key) ?? -999) < 0.45) return false;
+    target.__nativeHitIds.set(key, time);
+    if (target.__nativeHitIds.size > 200) target.__nativeHitIds.clear();
+    const box = playerHurtbox();
+    target.hit({ dmg: Math.max(1, Math.round(Number(damage || 0) * arenaSettings.damagePct / 100)),
+      poise: 15, dir: direction || 1, kind: 'boss', x: (box.x0 + box.x1) / 2,
+      y: (box.y0 + box.y1) / 2, big: Number(damage) >= 50, quiet: true });
+    return true;
+  };
+  bossCutsceneStart = function studioNativeCutscene(fighter) {
+    return fighter && fighter.__nativeTeam ? false : gameBossCutsceneStart(fighter);
+  };
+  bossPhase2Scene = function studioNativePhaseScene(fighter) {
+    if (fighter && fighter.__nativeTeam) return;
+    return gameBossPhase2Scene(fighter);
+  };
+  playCutscene = function studioNativeSkipScene(steps, done) {
+    if (nativeArenaContext) { if (typeof done === 'function') done(); return; }
+    return gamePlayCutscene(steps, done);
+  };
+  saveGame = function studioNativeSaveGuard(...args) {
+    if (nativeArenaFighters.length) return;
+    return gameSaveGame(...args);
+  };
+  function updateNativeObjects(originalUpdate, objects, dt) {
+    const ordinary = objects.filter(item => !item.__nativeOwner);
+    const owned = objects.filter(item => item.__nativeOwner);
+    let all = ordinary;
+    if (originalUpdate === gameUpdateProjectiles) projectiles = ordinary;
+    else hazards = ordinary;
+    originalUpdate(dt);
+    all = originalUpdate === gameUpdateProjectiles ? projectiles : hazards;
+    for (const fighter of nativeArenaFighters) {
+      const group = owned.filter(item => item.__nativeOwner === fighter);
+      if (!group.length) continue;
+      const target = nativeTarget(fighter);
+      if (!target) continue;
+      if (originalUpdate === gameUpdateProjectiles) projectiles = group;
+      else hazards = group;
+      try {
+        withNativeTarget(fighter, target, () => {
+          if (originalUpdate === gameUpdateProjectiles) for (const item of group) { item.__nativeOriginalOwner = item.owner; item.owner = 'player'; }
+          originalUpdate(dt);
+        });
+      } catch (error) {
+        fighter.__nativeBroken = true;
+        console.warn('Original boss projectile or hazard failed for ' + fighter.kind, error);
+      } finally {
+        const survivors = originalUpdate === gameUpdateProjectiles ? projectiles : hazards;
+        for (const item of survivors) {
+          item.__nativeOwner = fighter;
+          if (Object.prototype.hasOwnProperty.call(item, '__nativeOriginalOwner')) {
+            item.owner = item.__nativeOriginalOwner;
+            delete item.__nativeOriginalOwner;
+          }
+        }
+        all = all.concat(survivors);
+      }
+    }
+    if (originalUpdate === gameUpdateProjectiles) projectiles = all;
+    else hazards = all;
+  }
+  updateProjectiles = function studioNativeProjectiles(dt) {
+    if (!nativeArenaFighters.length) return gameUpdateProjectiles(dt);
+    return updateNativeObjects(gameUpdateProjectiles, projectiles, dt);
+  };
+  updateHazards = function studioNativeHazards(dt) {
+    if (!nativeArenaFighters.length) return gameUpdateHazards(dt);
+    return updateNativeObjects(gameUpdateHazards, hazards, dt);
+  };
+  function stopNativeArena() {
+    if (!nativeArenaFighters.length && !nativeArenaFlags) return;
+    projectiles = projectiles.filter(item => !item.__nativeOwner);
+    hazards = hazards.filter(item => !item.__nativeOwner);
+    nativeArenaFighters.length = 0;
+    nativeArenaRoom = null; nativeArenaWinner = null;
+    if (nativeArenaFlags) {
+      SAVE.flags = nativeArenaFlags;
+      SAVE.cinders = nativeArenaCinders;
+      nativeArenaFlags = null;
+    }
+  }
+  function updateNativeArena(dt) {
+    if (!nativeArenaFighters.length) return;
+    if (state !== 'play' || !room || room.id !== nativeArenaRoom) { stopNativeArena(); return; }
+    if (studioArenaPaused) return;
+    for (const fighter of nativeArenaFighters) {
+      if (fighter.__nativeBroken) continue;
+      if (!fighter.alive) {
+        if (fighter.__nativeDeathAt === undefined) fighter.__nativeDeathAt = time;
+        if (time - fighter.__nativeDeathAt < 2.2 && fighter.anim && typeof fighter.anim.update === 'function') fighter.anim.update(dt);
+        continue;
+      }
+      const target = nativeTarget(fighter);
+      if (!target) continue;
+      const oldProjectiles = new Set(projectiles), oldHazards = new Set(hazards);
+      try { withNativeTarget(fighter, target, () => {
+        fighter.update(dt);
+        if (fighter.alive && fighter.hp <= 0 && typeof fighter.die === 'function') fighter.die();
+      }); }
+      catch (error) {
+        fighter.__nativeBroken = true;
+        console.warn('Original boss AI failed for ' + fighter.kind, error);
+        toast(fighter.name + ' needs an arena adapter', 4);
+      }
+      for (const item of projectiles) if (!oldProjectiles.has(item)) item.__nativeOwner = fighter;
+      for (const item of hazards) if (!oldHazards.has(item)) item.__nativeOwner = fighter;
+      victoryBanner = null;
+      bossBanner = null;
+      if (state === 'cut' || state === 'cine' || state === 'ending') { state = 'play'; cut = null; cine = null; }
+    }
+    const livingTeams = [...new Set(nativeArenaFighters.filter(f => f.alive && !f.__nativeBroken).map(f => f.__nativeTeam))];
+    if (livingTeams.length === 1 && nativeArenaWinner !== livingTeams[0]) {
+      nativeArenaWinner = livingTeams[0];
+      const winner = nativeArenaFighters.find(f => f.__nativeTeam === nativeArenaWinner);
+      toast((winner?.__nativeTeamName || 'A team') + ' wins the original-AI battle', 5);
+    }
+  }
+  HOOKS.update.push(updateNativeArena);
+  HOOKS.enter.push(() => { if (nativeArenaFighters.length) stopNativeArena(); });
+  HOOKS.render.push(() => {
+    if (!nativeArenaFighters.length || !room || room.id !== nativeArenaRoom) return;
+    for (const fighter of nativeArenaFighters) {
+      if (fighter.__nativeBroken || (!fighter.alive && fighter.__nativeDeathAt !== undefined && time - fighter.__nativeDeathAt >= 2.2)) continue;
+      try { fighter.draw(); } catch (error) { fighter.__nativeBroken = true; console.warn('Original boss draw failed', error); }
+    }
+  });
+  function startNativeTeamBattle() {
+    if (TRAINING.on) throw new Error('Exit Training Grounds before a team battle.');
+    if (state !== 'play' || !room || !P) throw new Error('Enter a game room first.');
+    if (boss && boss.alive && !boss.__studioExhibition) throw new Error('A story boss is active in this room.');
+    const planned = teamSetup.teams.reduce((total, team) => total + team.roster.reduce((n, row) => n + row.count, 0), 0);
+    if (planned < 2 || planned > 100) throw new Error('Choose 2–100 fighters across your teams.');
+    stopBossExhibition();
+    boss = null;
+    nativeArenaFlags = { ...SAVE.flags };
+    nativeArenaCinders = SAVE.cinders;
+    nativeArenaRoom = room.id;
+    nativeArenaWinner = null;
+    arenaSettings = { ...teamSetup };
+    for (const team of teamSetup.teams) for (const row of team.roster)
+      for (const prefix of ['cut:', 'cutp2:', 'cutp3:']) SAVE.flags[prefix + row.kind] = 1;
+    try {
+      const teams = teamSetup.teams.filter(team => team.roster.length);
+      for (let ti = 0; ti < teams.length; ti++) {
+        const team = teams[ti];
+        for (const row of team.roster) for (let n = 0; n < row.count; n++) {
+          const factory = BOSS_SPAWN[row.kind] || fallbackBossFactories[row.kind];
+          if (!factory) throw new Error(BOSS_INFO[row.kind].name + ' has no native factory.');
+          const x = clamp((ti + 1) / (teams.length + 1) * room.pw + (n % 8 - 3.5) * 24, TILE + 30, room.pw - TILE - 30);
+          const spot = studioGroundPosition(x, P.y);
+          const fighter = factory(spot.x, spot.y, { kind: row.kind });
+          if (!fighter || typeof fighter.update !== 'function' || typeof fighter.draw !== 'function') throw new Error(BOSS_INFO[row.kind].name + ' cannot use its original AI here.');
+          fighter.active = true; fighter.introT = 0; fighter.cool = 0.3; fighter.state = 'idle';
+          if (fighter.anim && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
+          revealStudioBoss(fighter);
+          fighter.rewards = () => {};
+          fighter.__nativeTeam = team.id;
+          fighter.__nativeTeamName = team.name;
+          fighter.__nativeTeamColor = team.color;
+          fighter.__nativeSerial = ++studioBossSerial;
+          fighter.__nativeHitIds = new Map();
+          nativeArenaFighters.push(fighter);
+        }
+      }
+      if (nativeArenaFighters.length < 2) throw new Error('At least two bosses must spawn.');
+      boss = null;
+      toast(nativeArenaFighters.length + ' original-AI bosses spawned · experimental', 4);
+    } catch (error) { stopNativeArena(); throw error; }
+  }
   function stopBossExhibition() {
+    stopNativeArena();
     studioBosses.length = 0; studioArenaEffects.length = 0; studioArenaProjectiles.length = 0;
     studioBossRoom = null; studioTournament = null; studioActiveTeams = []; studioBattleWinner = null; studioArenaPaused = false;
   }
@@ -835,8 +1041,10 @@
   const nativeUpdateCamera = updateCamera;
   updateCamera = function studioUpdateCamera(dt, snap) {
     nativeUpdateCamera(dt, snap);
-    if (modState.bossCamera !== 'arena' || !studioBosses.length || !room || room.id !== studioBossRoom) return;
-    const living = studioBosses.filter(f => f.alive);
+    if (modState.bossCamera !== 'arena' || !room) return;
+    const living = nativeArenaFighters.length && room.id === nativeArenaRoom
+      ? nativeArenaFighters.filter(f => f.alive && !f.__nativeBroken)
+      : room.id === studioBossRoom ? studioBosses.filter(f => f.alive) : [];
     if (!living.length) return;
     const focus = living.reduce((sum, fighter) => sum + fighter.x, 0) / living.length;
     const maxX = room.pw - W;
@@ -1283,7 +1491,7 @@
       '<section class="cs-page" data-page="player"><div class="cs-pagehead"><div><h2>Player Editor</h2><p>Edit core attributes and live resources directly.</p></div><span class="cs-badge">Immediate apply</span></div><div class="cs-grid"><div class="cs-card wide"><h3>Attributes</h3><div class="cs-fields four" data-stat-fields>' + statFields + '</div><div class="cs-status" data-status="player"></div></div><div class="cs-card"><h3>Live resources</h3><div class="cs-fields">' + field('hp','Current HP',P ? P.hp : 0) + field('fp','Current FP',P ? P.fp : 0) + field('st','Current stamina',P ? P.st : 0) + '</div></div><div class="cs-card"><h3>Mobility</h3>' + toggle('infJump','Infinite air jumps','Continuously refill aerial movement') + toggle('noclip','Noclip flight','Ignore collision and gravity') + '<div class="cs-field" style="margin-top:10px"><label>Flight speed</label><input class="cs-range" type="range" min="100" max="1500" step="25" data-range="noclipSpeed"><output data-output="noclipSpeed"></output></div></div><div class="cs-card wide"><h3>Camera field of view</h3><p class="cs-help">See more of the room while the HUD keeps its normal size. 100% is the game default; wider views use classic lighting. Zoom out as far as 5×.</p><div class="cs-field"><label>View width</label><input class="cs-range" type="range" min="100" max="500" step="10" data-range="fov"><output data-output="fov"></output></div></div></div></section>',
       '<section class="cs-page" data-page="inventory"><div class="cs-pagehead"><div><h2>Inventory & Progression</h2><p>Currency, flasks, materials, skills, spells, and equipment ownership.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Economy</h3><div class="cs-fields">' + field('cinders','Cinders',SAVE.cinders) + field('shards','Skill shards',SAVE.shards) + field('emberstone','Emberstone',SAVE.inv.emberstone || 0) + '</div></div><div class="cs-card"><h3>Flasks</h3><div class="cs-fields">' + field('flaskBase','Total charges',SAVE.flaskBase) + field('flaskBlue','Azure allocation',SAVE.flaskBlue) + field('flaskPot','Flask potency',SAVE.flaskPot) + '</div></div><div class="cs-card wide"><h3>Ownership</h3><div class="cs-actions"><button class="cs-btn" data-action="ownership">Safely unlock all gear, skills and charms</button><button class="cs-btn" data-action="currency">Max currencies and materials</button><button class="cs-btn" data-action="save">Commit inventory to save</button><button class="cs-btn" data-action="fireworks">Preview reward effect</button></div><p class="cs-help" style="margin-top:10px">Preserves the equipped loadout and follows the game’s mutually exclusive skill-tree rules.</p></div></div></section>',
       '<section class="cs-page" data-page="combat"><div class="cs-pagehead"><div><h2>Combat Systems</h2><p>Damage, AI control, defensive automation, and arsenal behavior.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Damage model</h3><div class="cs-field"><label>Global weapon base power</label><input class="cs-range" type="range" min="1" max="100000" step="100" data-range="weaponPower"><output data-output="weaponPower"></output></div>' + toggle('oneHit','One-hit hostiles','Set enemies and bosses to one HP') + toggle('killAura','Kill aura','Defeat nearby targets automatically') + '</div><div class="cs-card"><h3>AI & projectiles</h3>' + toggle('freeze','Freeze all AI','Stops enemies and active bosses') + toggle('vacuum','Enemy vacuum','Pull enemies toward the player') + toggle('shield','Projectile shield','Remove enemy shots and hazards') + '</div><div class="cs-card wide"><h3>Arsenal automation</h3>' + toggle('randomArsenal','Random arsenal','Cycle random weapons and arts') + toggle('storm','Cinder aura','Persistent ambient particle field') + '<div class="cs-actions" style="margin-top:10px"><button class="cs-btn" data-action="fireworks">Cinderfall effect</button><button class="cs-btn" data-action="clear">Clear active combat</button></div></div></div></section>',
-      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Original Boss Fight</h3><p class="cs-help">Fight the real boss AI in the game’s Training Grounds. It uses the boss’s original class, home arena, attacks, phases, healing, teleporting, and effects. Fights are one boss versus you; choose another boss after winning. Training restores your saved game when you exit to the title.</p><div class="cs-fields"><div class="cs-field"><label>Original boss</label><select class="cs-select" data-original-kind></select></div><div class="cs-field"><label>Fight mode</label><div class="cs-duel-readout">Original game rules · normal speed · home arena</div></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="original">Fight original boss</button><button class="cs-btn danger" data-boss-action="original-exit">Exit Training to title</button></div><div class="cs-status" data-original-status></div></div><div class="cs-card wide"><h3>Native Boss Spawn</h3><p class="cs-help">Experimental: puts one native boss in the current room. Arena-specific moves may fail here. Use Original Boss Fight above for the faithful encounter.</p><div class="cs-fields"><div class="cs-field"><label>Boss</label><select class="cs-select" data-native-kind></select></div><div class="cs-field"><label>AI mode</label><div class="cs-duel-readout">Original movement and attacks</div></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="native">Spawn native boss</button><button class="cs-btn danger" data-boss-action="native-clear">Clear spawned boss</button></div></div><div class="cs-card wide"><h3>Adapted Boss Arena</h3><p class="cs-help">Launch several copies instantly. Free-for-all bosses fight each other; Hunters chase the player. Start replaces the arena; Add brings in another wave.</p><div class="cs-fields four"><div class="cs-field"><label>Boss</label><select class="cs-select" data-quick-kind></select></div><div class="cs-field"><label>How many</label><input class="cs-input" type="number" min="1" max="50" value="3" data-quick-count></div><div class="cs-field"><label>Fight type</label><select class="cs-select" data-quick-mode><option value="brawl">Free-for-all</option><option value="hunt">Hunt player</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="quick">Start quick fight</button><button class="cs-btn" data-boss-action="quick-add">Add another wave</button></div></div><div class="cs-card wide"><h3>One-on-One Duel</h3><p class="cs-help">Pick two bosses and watch them duel. The player spectates but can still attack either fighter.</p><div class="cs-fields"><div class="cs-field"><label>First boss</label><select class="cs-select" data-duel-a></select></div><div class="cs-field"><label>Second boss</label><select class="cs-select" data-duel-b></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="duel">Start duel</button></div></div><div class="cs-card wide"><h3>Team Battle Forge</h3><p class="cs-help">Build mixed rosters with up to eight named teams. Set player allegiance and balance below. Arena fighters can be hit by the player and give no story rewards.</p><div class="cs-team-toolbar"><span data-boss-catalog-count></span><div><button class="cs-btn" data-team-action="add">+ Add team</button><button class="cs-btn" data-team-action="reset">Reset setup</button></div></div><div class="cs-team-list" data-team-list></div><div class="cs-fields four" style="margin-top:14px"><div class="cs-field"><label>Player side</label><select class="cs-select" data-team-player></select></div><div class="cs-field"><label>Player target chance</label><input class="cs-range" type="range" min="0" max="100" step="5" data-team-setting="playerAggro"><output data-team-output="playerAggro"></output></div><div class="cs-field"><label>Boss health</label><input class="cs-range" type="range" min="25" max="500" step="25" data-team-setting="hpPct"><output data-team-output="hpPct"></output></div><div class="cs-field"><label>Boss damage</label><input class="cs-range" type="range" min="25" max="300" step="25" data-team-setting="damagePct"><output data-team-output="damagePct"></output></div><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow arena</option></select></div><div class="cs-field full"><label class="cs-toggle"><div><strong>Friendly fire</strong><small>Your attacks can damage your own team when enabled.</small></div><input type="checkbox" data-team-friendly></label></div></div><div class="cs-actions" style="margin-top:12px"><button class="cs-btn primary" data-boss-action="start">Start team battle</button><button class="cs-btn" data-boss-action="reinforce">Send reinforcements</button></div></div><div class="cs-card wide"><h3>Adapted Tournament</h3><p class="cs-help">Random unique bosses enter a single-elimination bracket with adapted signature moves, telegraphs, projectiles, charges, and area attacks. New matches launch after each knockout.</p><div class="cs-fields"><div class="cs-field"><label>Entrants</label><select class="cs-select" data-tournament-size><option value="2">2 · one match</option><option value="4">4 · two rounds</option><option value="8" selected>8 · three rounds</option><option value="16">16 · four rounds</option></select></div><div class="cs-field"><label>Your role</label><select class="cs-select" data-tournament-player><option value="spectator">Spectate · bosses ignore you</option><option value="neutral">Free-for-all · bosses may attack you</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="tournament">Start tournament</button></div></div><div class="cs-card wide"><h3>Active Arena</h3><p class="cs-help">These controls apply to quick fights, duels, team battles and tournaments. Each living boss has a separate health bar; dead bars disappear.</p><div class="cs-actions"><button class="cs-btn" data-boss-action="pause">Pause arena AI</button><button class="cs-btn" data-boss-action="heal">Heal all fighters</button><button class="cs-btn danger wide" data-boss-action="stop">Clear arena</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena battle running.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
+      '<section class="cs-page" data-page="world"><div class="cs-pagehead"><div><h2>World & Bosses</h2><p>Control encounter state, exploration, rooms, and progression.</p></div></div><div class="cs-grid"><div class="cs-card"><h3>Boss state</h3><div class="cs-actions"><button class="cs-btn" data-action="bosses">Mark every boss defeated</button><button class="cs-btn danger" data-action="restoreBosses">Restore every boss</button></div><p class="cs-help" style="margin-top:10px">Restored bosses respawn when their arena is re-entered. The current room is rebuilt immediately.</p></div><div class="cs-card"><h3>Exploration</h3><div class="cs-actions"><button class="cs-btn" data-action="reveal">Reveal map and shrines</button><button class="cs-btn" data-action="shrine">Return to active shrine</button><button class="cs-btn" data-action="respawn">Rebuild current room</button><button class="cs-btn" data-action="clear">Clear current room</button></div></div><div class="cs-card wide"><h3>Original Boss Fight</h3><p class="cs-help">Fight the real boss AI in the game’s Training Grounds. It uses the boss’s original class, home arena, attacks, phases, healing, teleporting, and effects. Fights are one boss versus you; choose another boss after winning. Training restores your saved game when you exit to the title.</p><div class="cs-fields"><div class="cs-field"><label>Original boss</label><select class="cs-select" data-original-kind></select></div><div class="cs-field"><label>Fight mode</label><div class="cs-duel-readout">Original game rules · normal speed · home arena</div></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="original">Fight original boss</button><button class="cs-btn danger" data-boss-action="original-exit">Exit Training to title</button></div><div class="cs-status" data-original-status></div></div><div class="cs-card wide"><h3>Native Boss Spawn</h3><p class="cs-help">Experimental: puts one native boss in the current room. Arena-specific moves may fail here. Use Original Boss Fight above for the faithful encounter.</p><div class="cs-fields"><div class="cs-field"><label>Boss</label><select class="cs-select" data-native-kind></select></div><div class="cs-field"><label>AI mode</label><div class="cs-duel-readout">Original movement and attacks</div></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="native">Spawn native boss</button><button class="cs-btn danger" data-boss-action="native-clear">Clear spawned boss</button></div></div><div class="cs-card wide"><h3>Adapted Boss Arena</h3><p class="cs-help">Launch several copies instantly. Free-for-all bosses fight each other; Hunters chase the player. Start replaces the arena; Add brings in another wave.</p><div class="cs-fields four"><div class="cs-field"><label>Boss</label><select class="cs-select" data-quick-kind></select></div><div class="cs-field"><label>How many</label><input class="cs-input" type="number" min="1" max="50" value="3" data-quick-count></div><div class="cs-field"><label>Fight type</label><select class="cs-select" data-quick-mode><option value="brawl">Free-for-all</option><option value="hunt">Hunt player</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary" data-boss-action="quick">Start quick fight</button><button class="cs-btn" data-boss-action="quick-add">Add another wave</button></div></div><div class="cs-card wide"><h3>One-on-One Duel</h3><p class="cs-help">Pick two bosses and watch them duel. The player spectates but can still attack either fighter.</p><div class="cs-fields"><div class="cs-field"><label>First boss</label><select class="cs-select" data-duel-a></select></div><div class="cs-field"><label>Second boss</label><select class="cs-select" data-duel-b></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="duel">Start duel</button></div></div><div class="cs-card wide"><h3>Team Battle Forge</h3><p class="cs-help">Build mixed rosters with up to eight named teams. Original-AI teams run real boss update, animations, phases, and routed attacks in this room; some arena-specific moves may fail. Start with 1 vs 1 before trying up to 100.</p><div class="cs-team-toolbar"><span data-boss-catalog-count></span><div><button class="cs-btn" data-team-action="add">+ Add team</button><button class="cs-btn" data-team-action="reset">Reset setup</button></div></div><div class="cs-team-list" data-team-list></div><div class="cs-fields four" style="margin-top:14px"><div class="cs-field"><label>Player side</label><select class="cs-select" data-team-player></select></div><div class="cs-field"><label>Player target chance</label><input class="cs-range" type="range" min="0" max="100" step="5" data-team-setting="playerAggro"><output data-team-output="playerAggro"></output></div><div class="cs-field"><label>Boss health</label><input class="cs-range" type="range" min="25" max="500" step="25" data-team-setting="hpPct"><output data-team-output="hpPct"></output></div><div class="cs-field"><label>Boss damage</label><input class="cs-range" type="range" min="25" max="300" step="25" data-team-setting="damagePct"><output data-team-output="damagePct"></output></div><div class="cs-field"><label>Fight speed</label><input class="cs-range" type="range" min="25" max="300" step="25" data-range="bossFightSpeed"><output data-output="bossFightSpeed"></output></div><div class="cs-field"><label>Camera</label><select class="cs-select" data-boss-camera><option value="player">Follow player</option><option value="arena">Follow arena</option></select></div><div class="cs-field full"><label class="cs-toggle"><div><strong>Friendly fire</strong><small>Your attacks can damage your own team when enabled.</small></div><input type="checkbox" data-team-friendly></label></div></div><div class="cs-actions" style="margin-top:12px"><button class="cs-btn primary" data-boss-action="start">Start adapted team battle</button><button class="cs-btn" data-boss-action="reinforce">Send reinforcements</button><button class="cs-btn primary" data-boss-action="native-teams">Start original-AI teams · experimental</button></div></div><div class="cs-card wide"><h3>Adapted Tournament</h3><p class="cs-help">Random unique bosses enter a single-elimination bracket with adapted signature moves, telegraphs, projectiles, charges, and area attacks. New matches launch after each knockout.</p><div class="cs-fields"><div class="cs-field"><label>Entrants</label><select class="cs-select" data-tournament-size><option value="2">2 · one match</option><option value="4">4 · two rounds</option><option value="8" selected>8 · three rounds</option><option value="16">16 · four rounds</option></select></div><div class="cs-field"><label>Your role</label><select class="cs-select" data-tournament-player><option value="spectator">Spectate · bosses ignore you</option><option value="neutral">Free-for-all · bosses may attack you</option></select></div></div><div class="cs-actions" style="margin-top:10px"><button class="cs-btn primary wide" data-boss-action="tournament">Start tournament</button></div></div><div class="cs-card wide"><h3>Active Arena</h3><p class="cs-help">These controls apply to adapted and original-AI battles. Each living boss has a separate health bar; dead bars disappear.</p><div class="cs-actions"><button class="cs-btn" data-boss-action="pause">Pause arena AI</button><button class="cs-btn" data-boss-action="heal">Heal all fighters</button><button class="cs-btn danger wide" data-boss-action="stop">Clear arena</button></div><div class="cs-status" data-boss-status></div><div class="cs-duel-readout" data-boss-readout>No arena battle running.</div></div><div class="cs-card wide"><h3>World save</h3><div class="cs-actions"><button class="cs-btn primary" data-action="save">Save all current changes</button><button class="cs-btn" data-action="restore">Restore player resources</button></div></div></div></section>',
       '<section class="cs-page" data-page="gear"><div class="cs-pagehead"><div><h2>Professional Weapon Lab</h2><p>Author melee weapons, firearms, shotguns, launchers, and arcane guns with native combat integration.</p></div><span class="cs-badge">Persistent runtime weapons</span></div><form id="cs-weapon-form"><div class="cs-grid"><div class="cs-card wide"><h3>Identity & architecture</h3><div class="cs-fields four"><div class="cs-field"><label>Internal ID</label><input class="cs-input" name="id" value="studio_ember_rifle"></div><div class="cs-field"><label>Display name</label><input class="cs-input" name="name" value="Emberline Rifle"></div><div class="cs-field"><label>Weapon architecture</label><select class="cs-select" name="mode"><option value="melee">Melee only</option><option value="handgun">Handgun</option><option value="rifle" selected>Automatic rifle</option><option value="shotgun">Shotgun</option><option value="launcher">Launcher</option><option value="arcane">Arcane focus</option></select></div><div class="cs-field"><label>Base animation template</label><select class="cs-select" name="template" data-weapon-template></select></div><div class="cs-field"><label>Weapon art</label><select class="cs-select" name="art" data-art-template></select></div><div class="cs-field full"><label>Description</label><input class="cs-input" name="desc" value="A precision firearm authored in Cinderhollow Studio."></div></div></div>',
       '<div class="cs-card"><h3>Melee chassis</h3><div class="cs-fields">' + field('base','Base damage',120) + field('speed','Attack animation speed',1.8) + field('reach','Melee reach',1) + field('stam','Stamina cost',0.2) + field('poise','Melee poise',2) + '</div></div><div class="cs-card"><h3>Elemental melee profile</h3><div class="cs-fields">' + field('fire','Fire multiplier',0) + field('holy','Holy multiplier',0) + field('frost','Frost buildup',0) + field('bleed','Bleed buildup',0) + '</div></div>',
       '<div class="cs-card wide"><h3>Fire control & aiming</h3><div class="cs-fields four"><div class="cs-field"><label>Aim system</label><select class="cs-select" name="aimMode"><option value="directional">Keyboard directional</option><option value="cursor">Mouse cursor</option><option value="nearest">Auto-aim nearest</option><option value="facing">Facing direction</option></select></div><div class="cs-field"><label>Fire trigger</label><select class="cs-select" name="fireTrigger"><option value="light">Basic attack</option><option value="heavy">Heavy attack</option><option value="both">Both attacks</option></select></div><div class="cs-field"><label>Projectile visual</label><select class="cs-select" name="projectileVisual"><option value="ashbolt">Ember round</option><option value="sunspear">Sun spear</option><option value="shard">Arcane shard</option><option value="lance">Blue lance</option><option value="crescent">Blade wave</option><option value="arrow">Physical round</option></select></div><label class="cs-toggle"><div><strong>Full automatic</strong><small>Hold basic attack to keep firing</small></div><input type="checkbox" name="fullAuto" checked></label></div><div class="cs-fields four" style="margin-top:12px">' + field('fireRate','Rounds per second',8) + field('magSize','Magazine size',30) + field('reloadTime','Reload time (seconds)',1.2) + field('shotDamage','Shot damage multiplier',1.4) + field('critChance','Critical chance %',10) + field('critMultiplier','Critical multiplier',2) + field('recoil','Recoil force',25) + field('screenShake','Screen shake',2) + '</div></div>',
@@ -1305,13 +1513,15 @@
     const bossHudTitle = document.createElement('div'); bossHudTitle.className = 'cs-boss-stack-title'; bossHud.appendChild(bossHudTitle);
     setInterval(() => {
       const all = studioBossRoom === (room && room.id) ? studioBosses.filter(f => f.alive && f.hp > 0) : [];
+      if (nativeArenaRoom === (room && room.id)) all.push(...nativeArenaFighters.filter(f => f.alive && !f.__nativeBroken && f.hp > 0));
       if (all.length && boss && boss.active && boss.alive && boss.hp > 0 && !boss.__studioExhibition) all.unshift(boss);
       bossHud.classList.toggle('ch-hidden', !all.length);
       if (!all.length) { for (const row of bossHudRows.values()) row.remove(); bossHudRows.clear(); return; }
-      bossHudTitle.textContent = all.length + (all.length === 1 ? ' fighter' : ' fighters') + ' · ' + studioActiveTeams.length + (studioActiveTeams.length === 1 ? ' team' : ' teams');
+      const teamCount = nativeArenaFighters.length ? new Set(nativeArenaFighters.map(f => f.__nativeTeam)).size : studioActiveTeams.length;
+      bossHudTitle.textContent = all.length + (all.length === 1 ? ' fighter' : ' fighters') + ' · ' + teamCount + (teamCount === 1 ? ' team' : ' teams');
       const seen = new Set();
       for (const fighter of all) {
-        const key = fighter.__studioSerial || 'native'; seen.add(key);
+        const key = fighter.__studioSerial || fighter.__nativeSerial || 'native'; seen.add(key);
         let row = bossHudRows.get(key);
         if (!row) {
           row = document.createElement('div'); row.className = 'cs-boss-hp-row';
@@ -1320,9 +1530,9 @@
           const track = document.createElement('div'); track.className = 'cs-boss-hp-track';
           const fill = document.createElement('div'); fill.className = 'cs-boss-hp-fill'; track.appendChild(fill); row.append(label, track); bossHudRows.set(key, row); bossHud.appendChild(row);
         }
-        row.children[0].children[0].textContent = fighter.__studioTeamName ? fighter.__studioTeamName + ' · ' + fighter.name : fighter.name;
+        row.children[0].children[0].textContent = fighter.__studioTeamName || fighter.__nativeTeamName ? (fighter.__studioTeamName || fighter.__nativeTeamName) + ' · ' + fighter.name : fighter.name;
         row.children[0].children[1].textContent = Math.ceil(fighter.hp) + '/' + Math.ceil(fighter.maxHp);
-        row.children[1].firstChild.style.background = fighter.__studioTeamColor || '#a93a43';
+        row.children[1].firstChild.style.background = fighter.__studioTeamColor || fighter.__nativeTeamColor || '#a93a43';
         row.children[1].firstChild.style.width = (100 * Math.max(0, fighter.hp) / Math.max(1, fighter.maxHp)).toFixed(1) + '%';
       }
       for (const [key, row] of bossHudRows) if (!seen.has(key)) { row.remove(); bossHudRows.delete(key); }
@@ -1409,6 +1619,7 @@
         const action = button.dataset.bossAction;
         if (action === 'original') { startOriginalBossFight(root.querySelector('[data-original-kind]').value); root.querySelector('[data-original-status]').textContent = 'Fighting ' + BOSS_INFO[root.querySelector('[data-original-kind]').value].name + ' with original game AI.'; }
         else if (action === 'original-exit') { exitOriginalBossFight(); root.querySelector('[data-original-status]').textContent = 'Training ended. Continue from title.'; }
+        else if (action === 'native-teams') startNativeTeamBattle();
         else if (action === 'start') startTeamBattle(false);
         else if (action === 'reinforce') startTeamBattle(true);
         else if (action === 'native') spawnNativeBoss(root.querySelector('[data-native-kind]').value);
@@ -1417,7 +1628,7 @@
         else if (action === 'duel') { startBossClash(root.querySelector('[data-duel-a]').value, root.querySelector('[data-duel-b]').value); toast('One-on-one duel started', 3); }
         else if (action === 'tournament') startBossTournament(root.querySelector('[data-tournament-size]').value, root.querySelector('[data-tournament-player]').value);
         else if (action === 'pause') { studioArenaPaused = !studioArenaPaused; button.textContent = studioArenaPaused ? 'Resume arena AI' : 'Pause arena AI'; }
-        else if (action === 'heal') { for (const fighter of studioBosses) if (fighter.alive) fighter.hp = fighter.displayHp = fighter.maxHp; toast('Living fighters healed', 2); }
+        else if (action === 'heal') { for (const fighter of [...studioBosses, ...nativeArenaFighters]) if (fighter.alive) fighter.hp = fighter.displayHp = fighter.maxHp; toast('Living fighters healed', 2); }
         else stopBossExhibition();
         bossStatus.className = 'cs-status ok';
         bossStatus.textContent = action === 'stop' ? 'Arena cleared.' : action === 'native-clear' ? 'Native boss cleared.' : action === 'pause' ? (studioArenaPaused ? 'Arena AI paused.' : 'Arena AI resumed.') : action === 'heal' ? 'Living fighters healed.' : 'Launched. Close Studio to join in.';
@@ -1426,10 +1637,10 @@
     setInterval(() => {
       const out = root.querySelector('[data-boss-readout]');
       const alive = studioBosses.filter(f => f.alive && f.hp > 0).length;
-      out.textContent = studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioArenaPaused ? 'Paused · ' : '') + (studioTournament ? 'Tournament round ' + studioTournament.round + ' of ' + studioTournament.totalRounds : studioBattleWinner ? studioBattleWinner.name + ' wins' : studioActiveTeams.length + ' teams fighting') : boss && boss.__studioExhibition && boss.alive ? 'Native AI: ' + boss.name + ' · ' + Math.ceil(boss.hp) + '/' + Math.ceil(boss.maxHp) + ' HP' : 'No arena battle running.';
+      out.textContent = nativeArenaFighters.length ? nativeArenaFighters.filter(f => f.alive && !f.__nativeBroken).length + ' alive / ' + nativeArenaFighters.length + ' original-AI fighters · ' + (nativeArenaWinner ? nativeArenaWinner + ' wins' : 'fighting') : studioBosses.length ? alive + ' alive / ' + studioBosses.length + ' spawned · ' + (studioArenaPaused ? 'Paused · ' : '') + (studioTournament ? 'Tournament round ' + studioTournament.round + ' of ' + studioTournament.totalRounds : studioBattleWinner ? studioBattleWinner.name + ' wins' : studioActiveTeams.length + ' teams fighting') : boss && boss.__studioExhibition && boss.alive ? 'Native AI: ' + boss.name + ' · ' + Math.ceil(boss.hp) + '/' + Math.ceil(boss.maxHp) + ' HP' : 'No arena battle running.';
     }, 300);
 
-    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); const action = button.dataset.action; if (action === 'restore' && P) { P.hp = D.maxHp; P.fp = D.maxFp; P.st = D.maxSt; refillFlasks(); toast('Fully restored'); } if (action === 'clear') { stopBossExhibition(); enemies.length = 0; hazards = []; projectiles = projectiles.filter(p => p.owner === 'player'); toast('Room cleared'); } if (action === 'respawn') respawnCurrentRoom(); if (action === 'bosses') { defeatAllBosses(true); saveGame(); } if (action === 'restoreBosses') restoreAllBosses(true); if (action === 'reveal') revealWorld(); if (action === 'currency') { SAVE.cinders = 999999999; SAVE.inv.emberstone = 9999; SAVE.shards = 9999; toast('Economy maximized'); } if (action === 'grant') grantEverything(true); if (action === 'ownership') unlockOwnershipSafely(true); if (action === 'repairAttack') unlockOwnershipSafely(true); if (action === 'fireworks') fireworks(); if (action === 'save') { saveGame(); toast('Changes saved'); } if (action === 'shrine' && P) { stopBossExhibition(); respawnAtShrine(SAVE.shrine || (SAVE.shrines[0] || 'R1')); toast('Returned to shrine'); } if (action === 'focusGame') toggleUI(false); if (action === 'resetLoadout') resetLoadout(true); if (action === 'restoreWeapons') restoreWeaponValues(true); if (action === 'normalPlay') restoreNormalGameplay(true); if (action === 'enableRuntime') enableStudioRuntime(); if (action === 'cleanReplay') startCleanReplay(); }));
+    root.querySelectorAll('[data-action]').forEach(button => button.addEventListener('click', event => { event.preventDefault(); const action = button.dataset.action; if (action === 'restore' && P) { P.hp = D.maxHp; P.fp = D.maxFp; P.st = D.maxSt; refillFlasks(); toast('Fully restored'); } if (action === 'clear') { stopBossExhibition(); enemies.length = 0; hazards = []; projectiles = projectiles.filter(p => p.owner === 'player'); toast('Room cleared'); } if (action === 'respawn') respawnCurrentRoom(); if (action === 'bosses') { defeatAllBosses(true); saveGame(); } if (action === 'restoreBosses') restoreAllBosses(true); if (action === 'reveal') revealWorld(); if (action === 'currency') { SAVE.cinders = 999999999; SAVE.inv.emberstone = 9999; SAVE.shards = 9999; toast('Economy maximized'); } if (action === 'grant') grantEverything(true); if (action === 'ownership') unlockOwnershipSafely(true); if (action === 'repairAttack') unlockOwnershipSafely(true); if (action === 'fireworks') fireworks(); if (action === 'save') { if (nativeArenaFighters.length) toast('End the original-AI battle before saving', 3); else { saveGame(); toast('Changes saved'); } } if (action === 'shrine' && P) { stopBossExhibition(); respawnAtShrine(SAVE.shrine || (SAVE.shrines[0] || 'R1')); toast('Returned to shrine'); } if (action === 'focusGame') toggleUI(false); if (action === 'resetLoadout') resetLoadout(true); if (action === 'restoreWeapons') restoreWeaponValues(true); if (action === 'normalPlay') restoreNormalGameplay(true); if (action === 'enableRuntime') enableStudioRuntime(); if (action === 'cleanReplay') startCleanReplay(); }));
 
     const templateSelect = root.querySelector('[data-weapon-template]'), artSelect = root.querySelector('[data-art-template]');
     templateSelect.innerHTML = Object.keys(WEAPONS).filter(id => !id.startsWith('studio_')).map(id => '<option value="' + id + '">' + WEAPONS[id].name + '</option>').join('');
