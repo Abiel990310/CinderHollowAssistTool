@@ -14,4 +14,10 @@ The loader runs only on the Cinderhollow page or a local test host. It modifies 
 
 Open **World & Bosses → Original Boss Fight** to fight a boss using the game's own Training Grounds summoner. It runs the original boss AI in its home arena, including its built-in attacks, phase changes, healing, teleporting, and effects where that boss has them. Pick a boss, click **Fight original boss**, then close the Studio panel with F2. You can choose another boss afterward. **Exit Training to title** restores your saved game; continue from the title screen.
 
-Original fights are one boss against the player. The game uses one native boss slot and its boss AI targets the player. **Adapted Boss Arena**, duels, team battles, and tournaments remain available for boss-versus-boss fights, with simulated combat moves. The experimental **Native Boss Spawn** puts original AI in the current room and may miss arena-specific behavior; use Original Boss Fight for the intended encounter.
+**Original Boss Fight** is one boss against the player. The game uses one native boss slot and its boss AI targets the player. **Adapted Boss Arena**, duels, team battles, and tournaments remain available for boss-versus-boss fights with simulated combat moves. The experimental **Native Boss Spawn** puts one original AI boss in the current room and may miss arena-specific behavior; use Original Boss Fight for the intended player encounter.
+
+### Experimental original-AI teams
+
+In **Team Battle Forge**, set each team's boss types and counts, then click **Start original-AI teams**. This runs each spawned boss's original update, attack, animation, and phase methods while routing direct hits, projectiles, and hazards toward opposing bosses. It supports up to 100 fighters in the current room. Cutscenes, rewards, and saving are suppressed during the battle; **Clear arena** restores the prior boss flags. Start with a 1v1 match to check the selected bosses before trying large groups.
+
+This is an experimental compatibility layer, not a guarantee that every home-arena move works in every room. Bosses with special room scripts may fail and will be marked as needing an arena adapter. The existing adapted modes remain available, and the built-in Training Grounds remains the option for a complete player-versus-boss encounter.
