@@ -574,7 +574,7 @@
   }
   const nativeArenaFighters = [];
   let nativeArenaRoom = null, nativeArenaWinner = null, nativeArenaFlags = null, nativeArenaCinders = 0, nativeArenaContext = null;
-  const gameTargets = targets, gamePlayerHurtbox = playerHurtbox, gameHurtPlayer = hurtPlayer;
+  const gameTargets = targets, gamePlayerHurtbox = playerHurtbox, gameHurtPlayer = hurtPlayer, gameOutgoing = outgoing;
   const gameUpdateProjectiles = updateProjectiles, gameUpdateHazards = updateHazards;
   const gameBossCutsceneStart = bossCutsceneStart, gameBossPhase2Scene = bossPhase2Scene, gamePlayCutscene = playCutscene, gameSaveGame = saveGame;
   function nativeFoes(owner) {
@@ -615,6 +615,11 @@
       poise: 15, dir: direction || 1, kind: 'boss', x: (box.x0 + box.x1) / 2,
       y: (box.y0 + box.y1) / 2, big: Number(damage) >= 50, quiet: true });
     return true;
+  };
+  outgoing = function studioNativeProjectileDamage(base, multiplier, kind, attack) {
+    if (nativeArenaContext && attack && attack.__nativeOwner)
+      return Math.max(1, Number(base || 0) * Number(multiplier || 1) * arenaSettings.damagePct / 100);
+    return gameOutgoing(base, multiplier, kind, attack);
   };
   bossCutsceneStart = function studioNativeCutscene(fighter) {
     return fighter && fighter.__nativeTeam ? false : gameBossCutsceneStart(fighter);
@@ -762,6 +767,7 @@
           const spot = studioGroundPosition(x, P.y);
           const fighter = factory(spot.x, spot.y, { kind: row.kind });
           if (!fighter || typeof fighter.update !== 'function' || typeof fighter.draw !== 'function') throw new Error(BOSS_INFO[row.kind].name + ' cannot use its original AI here.');
+          fighter.maxHp = fighter.hp = fighter.displayHp = Math.max(1, Math.round(Number(fighter.maxHp || fighter.hp || BOSS_INFO[row.kind].hp || 1000) * arenaSettings.hpPct / 100));
           fighter.active = true; fighter.introT = 0; fighter.cool = 0.3; fighter.state = 'idle';
           if (fighter.anim && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
           revealStudioBoss(fighter);
