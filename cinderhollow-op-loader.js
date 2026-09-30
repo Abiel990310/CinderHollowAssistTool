@@ -387,6 +387,33 @@
       if (sh && sh.has && sh.has('idle') && typeof actor.anim.set === 'function') actor.anim.set('idle', true, 1);
     }
   }
+  function studioFloorAt(x, fromY) {
+    if (!room) return null;
+    const tx = Math.floor(clamp(x, 0, room.pw - 1) / TILE);
+    const start = clamp(Math.floor(fromY / TILE), 0, room.h - 1);
+    let floorY = null;
+    for (let row = start; row < room.h; row++) {
+      const cell = tileAt(tx, row);
+      if (isSolidT(cell) || cell === T_PLAT) { floorY = row * TILE; break; }
+    }
+    for (const platform of room.dyn || []) {
+      if (platform.on() && x >= platform.x0 && x < platform.x1 && platform.y0 >= fromY - 2 && (floorY === null || platform.y0 < floorY)) floorY = platform.y0;
+    }
+    return floorY;
+  }
+  function studioGroundPosition(wantedX, fromY) {
+    const preferred = studioFloorAt(P.x, P.y - 2) ?? P.y;
+    let best = null;
+    for (let step = 0; step <= 6; step++) for (const direction of step ? [-1, 1] : [0]) {
+      const x = clamp(wantedX + direction * step * TILE, TILE + 25, room.pw - TILE - 25);
+      const y = studioFloorAt(x, fromY - 2);
+      if (y === null) continue;
+      const score = Math.abs(y - preferred) + Math.abs(x - wantedX) * 2;
+      if (!best || score < best.score) best = { x, y, score };
+    }
+    if (!best) throw new Error('No safe floor near the spawn point in this room.');
+    return best;
+  }
   function makeStudioBoss(kind, x, y, team) {
     const factory = BOSS_SPAWN[kind] || fallbackBossFactories[kind];
     const fighter = factory && factory(x, y, { kind });
@@ -427,7 +454,8 @@
     const factory = BOSS_SPAWN[kind] || fallbackBossFactories[kind];
     if (!factory) throw new Error('Choose an available boss.');
     if (boss && boss.alive && !boss.__studioExhibition) throw new Error('A story boss is active. Clear it or leave its arena first.');
-    const fighter = factory(clamp(P.x + (P.face || 1) * 180, TILE + 25, room.pw - TILE - 25), P.y, { kind });
+    const spot = studioGroundPosition(clamp(P.x + (P.face || 1) * 180, TILE + 25, room.pw - TILE - 25), P.y);
+    const fighter = factory(spot.x, spot.y, { kind });
     if (!fighter || typeof fighter.update !== 'function') throw new Error('This boss has no native AI in this build.');
     fighter.active = true; fighter.introT = 0; fighter.state = 'idle'; fighter.__studioExhibition = true;
     if (fighter.anim && fighter.sh && fighter.sh.has('idle')) fighter.anim.set('idle', true, 1);
@@ -480,7 +508,8 @@
       let slot = 0;
       for (const row of team.roster) for (let n = 0; n < row.count; n++) {
         const x = clamp(baseX + ((slot % 5) - 2) * 20, TILE + 25, room.pw - TILE - 25);
-        const fighter = makeStudioBoss(row.kind, x, P.y, team);
+        const spot = studioGroundPosition(x, P.y);
+        const fighter = makeStudioBoss(row.kind, spot.x, spot.y, team);
         studioBosses.push(fighter); slot++;
       }
     }
@@ -574,10 +603,15 @@
       if (distance > 72) {
         const dx = fighter.face * 62 * dt;
         const nextX = clamp(fighter.x + dx, TILE + 25, room.pw - TILE - 25);
-        const moved = nextX - fighter.x;
-        fighter.x = nextX;
-        if (fighter.parts) for (const part of fighter.parts) if (Number.isFinite(part.x)) part.x += moved;
-        if (fighter.spine) for (const point of fighter.spine) if (Number.isFinite(point.x)) point.x += moved;
+        const nextFloor = studioFloorAt(nextX, (fighter.floor ?? fighter.y) - TILE - 2);
+        if (nextFloor !== null && Math.abs(nextFloor - (fighter.floor ?? fighter.y)) <= TILE * 2) {
+          const moved = nextX - fighter.x, rise = nextFloor - (fighter.floor ?? fighter.y);
+          fighter.x = nextX; fighter.y += rise; if (Number.isFinite(fighter.floor)) fighter.floor = nextFloor;
+          if (Number.isFinite(fighter.baseY)) fighter.baseY += rise;
+          if (Number.isFinite(fighter.hoverY)) fighter.hoverY += rise;
+          if (fighter.parts) for (const part of fighter.parts) { if (Number.isFinite(part.x)) part.x += moved; if (Number.isFinite(part.y)) part.y += rise; if (Number.isFinite(part.floor)) part.floor += rise; }
+          if (fighter.spine) for (const point of fighter.spine) { if (Number.isFinite(point.x)) point.x += moved; if (Number.isFinite(point.y)) point.y += rise; }
+        }
       }
       fighter.__studioSwing = Math.max(0, fighter.__studioSwing - dt);
       fighter.__studioNextHit -= dt;
